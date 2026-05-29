@@ -1,0 +1,3 @@
+# cryptosweep test fixture — one PQ-flagged hit (rsa) plus a clean dep.
+rsa==4.9
+httpx==0.27.0

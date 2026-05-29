@@ -1,0 +1,13 @@
+{
+  "name": "csw-fixture-app",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2",
+    "crypto-js": "^4.2.0",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}
