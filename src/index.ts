@@ -20,3 +20,7 @@ export type {
 export { analyzeTls, normalizeCert, scanTls, signatureAlgorithmFromDer } from "./scanners/tls";
 export type { ClonedRepo, SourceScanOptions } from "./scanners/source";
 export { cloneRepo, scanContent, scanSource } from "./scanners/source";
+export type { DepsScanOptions, ParsedDep } from "./scanners/deps";
+export { matchDeps, scanDeps } from "./scanners/deps";
+export type { Ecosystem, RegistryEntry } from "./scanners/deps/registry";
+export { REGISTRY, lookupEntry } from "./scanners/deps/registry";
