@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Cryptosweep — post-quantum readiness for legal SaaS</title>
+<meta name="description" content="Free 1-page post-quantum cryptographic readiness report for your domain. NIST-mapped remediations within 24 hours." />
+<style>
+:root { --fg:#111; --muted:#555; --accent:#0a5; --bg:#fafaf7; --line:#e2e2dc; }
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--fg);background:var(--bg);}
+main{max-width:640px;margin:0 auto;padding:48px 24px 96px;}
+h1{font-size:34px;line-height:1.15;margin:0 0 16px;letter-spacing:-0.01em;}
+.sub{font-size:18px;color:var(--muted);margin:0 0 36px;}
+section{margin:28px 0;}
+section h2{font-size:18px;margin:0 0 6px;}
+section p{margin:0;color:var(--muted);}
+form{margin-top:36px;padding:20px;border:1px solid var(--line);border-radius:8px;background:#fff;}
+label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px;color:var(--fg);}
+input[type=email],input[type=text]{width:100%;padding:10px 12px;font-size:15px;border:1px solid var(--line);border-radius:6px;background:#fff;}
+input:focus{outline:2px solid var(--accent);outline-offset:1px;}
+.hp{position:absolute;left:-10000px;top:-10000px;width:1px;height:1px;overflow:hidden;}
+button{margin-top:16px;width:100%;padding:12px 14px;font-size:15px;font-weight:600;color:#fff;background:var(--accent);border:0;border-radius:6px;cursor:pointer;}
+button:hover{filter:brightness(0.95);}
+#ok{display:none;margin-top:14px;padding:12px;background:#eef9f1;border:1px solid #b9e3c4;border-radius:6px;color:#0a5;font-size:14px;}
+#err{display:none;margin-top:14px;padding:12px;background:#fdeeee;border:1px solid #e7b3b3;border-radius:6px;color:#a31515;font-size:14px;}
+footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);}
+footer a{color:var(--muted);}
+</style>
+</head>
+<body>
+<main>
+<h1>Post-quantum readiness for legal SaaS.</h1>
+<p class="sub">Your clients' privileged data has a 30-year confidentiality horizon. RSA and ECDSA do not. We map your cryptographic exposure and hand you a migration plan in two weeks.</p>
+
+<section>
+<h2>Harvest now, decrypt later.</h2>
+<p>Adversaries copy encrypted traffic today, decrypt with quantum computers later. NIST finalized PQC standards in 2024 (ML-KEM, ML-DSA). Most TLS still defaults to RSA / ECDSA. Legal data with 7+ year retention is the highest-value target.</p>
+</section>
+
+<section>
+<h2>The free scan.</h2>
+<p>Enter your domain, get a 1-page PQ-readiness report by email within 24h. No call required.</p>
+</section>
+
+<section>
+<h2>What we look at.</h2>
+<p>TLS posture (cert chain, key types, sig algs, hybrid-KEX support), source-code crypto patterns if your repo is public, dependency audit. Report includes severity, recommendations, and NIST-mapped remediations.</p>
+</section>
+
+<form id="f" method="POST" action="/api/scan-request" autocomplete="off" novalidate>
+  <label for="email">Work email</label>
+  <input id="email" type="email" name="email" required placeholder="you@firm.com" />
+  <label for="target">Domain to scan</label>
+  <input id="target" type="text" name="target" required placeholder="acme.com" />
+  <div class="hp" aria-hidden="true">
+    <label for="company_url">Company URL</label>
+    <input id="company_url" type="text" name="company_url" tabindex="-1" autocomplete="off" />
+  </div>
+  <button type="submit">Get my free report</button>
+  <div id="ok">Got it. We'll email your report within 24 hours. Watch for it from <code>scan@cryptosweep.com</code>.</div>
+  <div id="err" role="alert"></div>
+</form>
+
+<footer>
+<a href="/privacy">Privacy</a> &middot; &copy; 2026 Cryptosweep
+</footer>
+</main>
+<script>
+(function(){
+  var f=document.getElementById('f');
+  var ok=document.getElementById('ok');
+  var err=document.getElementById('err');
+  f.addEventListener('submit',function(e){
+    e.preventDefault();
+    err.style.display='none'; ok.style.display='none';
+    var fd=new FormData(f);
+    var body=new URLSearchParams();
+    fd.forEach(function(v,k){ body.append(k,String(v)); });
+    fetch('/api/scan-request',{method:'POST',body:body,headers:{'content-type':'application/x-www-form-urlencoded'}})
+      .then(function(r){ return r.json().then(function(j){ return {status:r.status,json:j}; }); })
+      .then(function(res){
+        if(res.status===202){ ok.style.display='block'; f.reset(); return; }
+        var msg=(res.json&&res.json.error)?res.json.error:'request_failed';
+        err.textContent=msg==='invalid_email'?'That email looks invalid.':msg==='invalid_target'?'That domain looks invalid.':msg==='rate_limited'?'Too many requests. Try again shortly.':'Could not submit. Please try again.';
+        err.style.display='block';
+      })
+      .catch(function(){ err.textContent='Network error. Try again.'; err.style.display='block'; });
+  });
+})();
+</script>
+</body>
+</html>
