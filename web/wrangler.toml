@@ -1,0 +1,20 @@
+name = "cryptosweep-web"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cryptosweep_web_dev"
+database_id = "TBD-MAX-WILL-PROVIDE"
+
+[[kv_namespaces]]
+binding = "RL_KV"
+id = "TBD-MAX-WILL-PROVIDE"
+
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
+fallthrough = true
+
+[vars]
+NODE_ENV = "development"
