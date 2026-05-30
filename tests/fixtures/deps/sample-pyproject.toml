@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "csw-fixture"
+version = "0.0.0"
+description = "cryptosweep test fixture"
+requires-python = ">=3.11"
+dependencies = [
+  "pyjwt>=2.8.0",
+  "rich>=13.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]

@@ -11,8 +11,10 @@ import { writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { cac } from "cac";
 import { buildReport, toJson, toMarkdown } from "./report";
+import type { Finding } from "./report";
 import { scanTls } from "./scanners/tls";
 import { cloneRepo, scanSource } from "./scanners/source";
+import { scanDeps } from "./scanners/deps";
 import { VERSION } from "./version";
 
 interface ScanOptions {
@@ -67,7 +69,7 @@ async function runScan(target: string, options: ScanOptions): Promise<void> {
             timeoutMs,
           })
         : parsed.kind === "path"
-          ? await scanSource(parsed.dir)
+          ? await scanLocalDir(parsed.dir)
           : await scanClonedRepo(parsed.url);
 
     const report = buildReport(target, findings);
@@ -90,10 +92,15 @@ async function runScan(target: string, options: ScanOptions): Promise<void> {
   }
 }
 
-async function scanClonedRepo(url: string): Promise<Awaited<ReturnType<typeof scanSource>>> {
+async function scanLocalDir(dir: string): Promise<Finding[]> {
+  const [source, deps] = await Promise.all([scanSource(dir), scanDeps(dir)]);
+  return [...source, ...deps];
+}
+
+async function scanClonedRepo(url: string): Promise<Finding[]> {
   const repo = await cloneRepo(url);
   try {
-    return await scanSource(repo.dir);
+    return await scanLocalDir(repo.dir);
   } finally {
     await repo.cleanup();
   }
