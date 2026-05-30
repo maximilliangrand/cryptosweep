@@ -4,17 +4,20 @@
  *
  * Subcommands:
  *   scan <target>   scan a hostname/URL (TLS) or a GitHub repo / local dir (source)
+ *   email           email a previously-generated JSON report via Resend
  *   version         print the version
  *   help            print usage
  */
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { cac } from "cac";
 import { buildReport, toJson, toMarkdown } from "./report";
-import type { Finding } from "./report";
+import type { Finding, Report } from "./report";
 import { scanTls } from "./scanners/tls";
 import { cloneRepo, scanSource } from "./scanners/source";
 import { scanDeps } from "./scanners/deps";
+import { renderHtml, renderText } from "./email/render";
+import { sendEmail } from "./email/resend";
 import { VERSION } from "./version";
 
 interface ScanOptions {
@@ -106,6 +109,53 @@ async function scanClonedRepo(url: string): Promise<Finding[]> {
   }
 }
 
+interface EmailOptions {
+  report?: string;
+  to?: string;
+  from?: string;
+  subject?: string;
+}
+
+const DEFAULT_FROM = "scan@cryptosweep.com";
+
+async function loadReport(path: string): Promise<Report> {
+  const raw = await readFile(path, "utf8");
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== "object") throw new Error(`${path}: not a JSON object`);
+  const candidate = parsed as Partial<Report>;
+  if (typeof candidate.target !== "string" || !Array.isArray(candidate.findings) || !candidate.summary) {
+    throw new Error(`${path}: not a cryptosweep report (missing target/findings/summary)`);
+  }
+  return candidate as Report;
+}
+
+async function runEmail(options: EmailOptions): Promise<void> {
+  try {
+    if (!options.report) throw new Error("--report <file> is required");
+    if (!options.to) throw new Error("--to <email> is required");
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey) throw new Error("RESEND_API_KEY is not set");
+    const from = options.from ?? process.env.SCAN_FROM_EMAIL ?? DEFAULT_FROM;
+    const report = await loadReport(options.report);
+    const subject = options.subject ?? `cryptosweep PQ readiness report — ${report.target}`;
+    const result = await sendEmail({
+      apiKey,
+      from,
+      to: options.to,
+      subject,
+      html: renderHtml(report),
+      text: renderText(report),
+    });
+    if (result.error || !result.id) {
+      throw new Error(result.error ?? "unknown Resend error");
+    }
+    stdout(`Sent email ${result.id} to ${options.to} (from ${from}).\n`);
+  } catch (err) {
+    stderr(`cryptosweep: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exitCode = 1;
+  }
+}
+
 const cli = cac("cryptosweep");
 
 cli
@@ -117,6 +167,15 @@ cli
   .example("  cryptosweep scan https://www.example.com --out report.json")
   .example("  cryptosweep scan facebook/react")
   .action(runScan);
+
+cli
+  .command("email", "Email a previously-generated JSON report via Resend")
+  .option("--report <file>", "Path to a cryptosweep JSON report")
+  .option("--to <email>", "Recipient email address")
+  .option("--from <email>", `Sender email (defaults to $SCAN_FROM_EMAIL or ${DEFAULT_FROM})`)
+  .option("--subject <subject>", "Email subject (defaults to a per-target line)")
+  .example("  cryptosweep email --report /tmp/csw-smoke.json --to lead@example.com")
+  .action(runEmail);
 
 cli.command("version", "Print the cryptosweep version").action(() => stdout(`${VERSION}\n`));
 cli.command("help", "Print usage").action(() => cli.outputHelp());
