@@ -1,0 +1,11 @@
+[package]
+name = "csw-fixture"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+rsa = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+proptest = "1.4"
