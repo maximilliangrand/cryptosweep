@@ -10,7 +10,7 @@ const HTML_HEADERS = {
 };
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
 
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
@@ -18,7 +18,7 @@ export default {
     }
 
     if (req.method === "POST" && url.pathname === "/api/scan-request") {
-      return handleScanRequest(req, env);
+      return handleScanRequest(req, env, ctx);
     }
 
     if (req.method === "GET" && url.pathname === "/healthz") {

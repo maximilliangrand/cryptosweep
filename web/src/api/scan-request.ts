@@ -6,6 +6,7 @@ import {
   validateHoneypot,
   validateTarget,
 } from "../lib/validate";
+import { buildScanRequestEmbed, postDiscordWebhook } from "../lib/discord-webhook";
 import type { Env } from "../env";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
@@ -14,7 +15,7 @@ function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 }
 
-export async function handleScanRequest(req: Request, env: Env): Promise<Response> {
+export async function handleScanRequest(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const ip = req.headers.get("CF-Connecting-IP") ?? req.headers.get("X-Forwarded-For") ?? "0.0.0.0";
   const ipHash = await hashIp(env.IP_HASH_SECRET, ip);
   const now = Date.now();
@@ -47,6 +48,16 @@ export async function handleScanRequest(req: Request, env: Env): Promise<Respons
   )
     .bind(id, email, target, ipHash, userAgent, referer, now)
     .run();
+
+  if (env.DISCORD_WEBHOOK_URL) {
+    const payload = buildScanRequestEmbed({
+      id,
+      email,
+      target,
+      timestamp: new Date(now).toISOString(),
+    });
+    ctx.waitUntil(postDiscordWebhook(env.DISCORD_WEBHOOK_URL, payload));
+  }
 
   return jsonResponse(202, { ok: true, id });
 }
