@@ -18,3 +18,6 @@ fallthrough = true
 
 [vars]
 NODE_ENV = "development"
+# Set to a Discord channel webhook URL (with `wrangler secret put DISCORD_WEBHOOK_URL` in prod) to
+# get a real-time ping on each successful /api/scan-request. Leave empty to disable.
+DISCORD_WEBHOOK_URL = ""
