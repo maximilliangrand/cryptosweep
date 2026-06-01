@@ -3,4 +3,5 @@ export interface Env {
   RL_KV: KVNamespace;
   IP_HASH_SECRET: string;
   NODE_ENV: string;
+  DISCORD_WEBHOOK_URL: string;
 }

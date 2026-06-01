@@ -52,9 +52,55 @@ Options for `scan`:
 | `--port <port>` | TLS port (defaults to 443 or the port in the target) |
 | `--timeout <ms>` | TLS handshake timeout (default 10000) |
 
-Other commands: `cryptosweep version`, `cryptosweep help`.
+Other commands: `cryptosweep email`, `cryptosweep version`, `cryptosweep help`.
 
 With no `--out`/`--md`, the Markdown report is printed to stdout.
+
+### Emailing a report
+
+`cryptosweep email` takes a previously-generated JSON report and sends it to a
+recipient via [Resend](https://resend.com). HTML + plain-text bodies are
+rendered locally; no SDK dependency.
+
+```bash
+cryptosweep email --report /tmp/csw-smoke.json --to lead@example.com
+cryptosweep email --report /tmp/csw-smoke.json --to lead@example.com \
+  --from scan@cryptosweep.com --subject "Your cryptosweep PQ readiness report"
+```
+
+| Option | Description |
+| --- | --- |
+| `--report <file>` | Path to a cryptosweep JSON report (from `scan --out`) |
+| `--to <email>` | Recipient email address |
+| `--from <email>` | Sender address (defaults to `$SCAN_FROM_EMAIL` or `scan@cryptosweep.com`) |
+| `--subject <subject>` | Email subject (defaults to a per-target line) |
+
+Required env var: `RESEND_API_KEY`. The `--from` domain must be verified in
+your Resend dashboard.
+
+### Fulfilling a scan request manually (v0.1 workflow)
+
+The hosted landing page (`web/`) captures scan requests into D1 and pings
+Discord on each new entry. v0.1 fulfilment is intentionally manual:
+
+1. Discord ping arrives via webhook with the requester's email + target.
+2. Generate the report:
+   ```bash
+   node dist/cli.js scan <target> --out /tmp/<id>.json
+   ```
+3. Email it:
+   ```bash
+   node dist/cli.js email --report /tmp/<id>.json --to <email>
+   ```
+4. Done — the recipient receives the report via Resend.
+
+### Environment variables
+
+| Var | Where | Description |
+| --- | --- | --- |
+| `RESEND_API_KEY` | CLI (`email`) | Required. Resend API key. |
+| `SCAN_FROM_EMAIL` | CLI (`email`) | Optional. Sender address; defaults to `scan@cryptosweep.com`. Must be a verified Resend sender. |
+| `DISCORD_WEBHOOK_URL` | Worker (`web/`) | Optional. Discord channel webhook fired on each successful `/api/scan-request`. Leave empty to disable. Set in prod with `wrangler secret put DISCORD_WEBHOOK_URL`. |
 
 ## Output format
 
