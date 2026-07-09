@@ -61,6 +61,12 @@ If your customer's data still matters in 2040, you are the user.
 
 All three run automatically against a local directory or shallow-cloned GitHub repo. TLS-only mode runs against a hostname.
 
+Every dependency finding carries at least one provenance reference (the standard or advisory that justifies flagging it). The JS/TS source scanner parses the code with an AST rather than grepping, so a weak-crypto call in a comment or an unrelated string is not a false positive, and an import-resolved call is reported at `confirmed` confidence.
+
+### Advisory cross-reference (opt-in)
+
+`--advisories` adds a *separate* dimension to dependency findings: known CVE advisories, looked up on [OSV.dev](https://osv.dev). It is off by default and is the only network path in the tool. When enabled it makes a single POST to `api.osv.dev/v1/querybatch` for the dependencies that are both already flagged and concretely version-pinned (a range or unpinned version is skipped, since attaching a CVE to a version you may not have installed would be a guess). It never changes a finding's severity or post-quantum status; it only appends references and one `Known advisories (not PQ):` line. Any network error fails closed to the exact offline result. Note that enabling it discloses the flagged package names and versions to a third-party service.
+
 ---
 
 ## Quick start
@@ -123,6 +129,7 @@ Every finding also carries a `confidence` level (`confirmed` = parsed structure;
 | `--html <file>` | Write a self-contained interactive HTML report | (none) |
 | `--fail-on <severity>` | Exit non-zero if any finding is at/above this severity | (off) |
 | `--allow-private` | Allow scanning non-public addresses (localhost, RFC 1918) | (off) |
+| `--advisories` | Cross-reference flagged deps against OSV.dev for known CVEs (network) | (off) |
 | `--port <port>` | TLS port | 443 (or as in URL) |
 | `--timeout <ms>` | TLS handshake timeout | 10000 |
 

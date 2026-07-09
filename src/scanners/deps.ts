@@ -14,6 +14,8 @@ import { REFS } from "../crypto";
 import { parsePackageJson, parsePnpmLock, type ParsedDep } from "./deps/parsers/npm";
 import { parsePyproject, parseRequirementsTxt } from "./deps/parsers/python";
 import { parseCargoToml } from "./deps/parsers/cargo";
+import { annotateWithAdvisories } from "./deps/advisories";
+import type { AdvisoryOptions } from "./deps/advisories";
 
 export type { ParsedDep } from "./deps/parsers/npm";
 
@@ -21,6 +23,8 @@ export interface DepsScanOptions {
   ignoreDirs?: string[];
   /** Files larger than this (bytes) are skipped. */
   maxFileBytes?: number;
+  /** Opt-in OSV.dev advisory enrichment (network). Off unless enabled. */
+  advisories?: AdvisoryOptions;
 }
 
 const DEFAULT_IGNORE_DIRS = new Set([
@@ -118,6 +122,19 @@ function referencesFor(pq: PqStatus): Reference[] {
   return [];
 }
 
+/** Merge references keeping first occurrence per label, stable order. */
+function dedupeByLabel(refs: Reference[]): Reference[] {
+  const seen = new Set<string>();
+  const out: Reference[] = [];
+  for (const ref of refs) {
+    if (!seen.has(ref.label)) {
+      seen.add(ref.label);
+      out.push(ref);
+    }
+  }
+  return out;
+}
+
 function toFinding(dep: ParsedDep, entry: RegistryEntry, ids: IdAllocator): Finding {
   const versionLabel = dep.version || "*";
   const a = assess(dep, entry);
@@ -132,7 +149,9 @@ function toFinding(dep: ParsedDep, entry: RegistryEntry, ids: IdAllocator): Find
     pq_status: a.pq_status,
     confidence: a.confidence,
     recommendation: a.recommendation,
-    references: referencesFor(a.pq_status),
+    // Entry-specific provenance first, then the generic standards for the
+    // assessed posture (so rustls >= 0.23, now transitional, keeps FIPS 203).
+    references: dedupeByLabel([...(entry.references ?? []), ...referencesFor(a.pq_status)]),
   };
 }
 
@@ -247,5 +266,9 @@ export async function scanDeps(rootDir: string, options: DepsScanOptions = {}): 
   for (const hit of hits) {
     allDeps.push(...(await parseManifest(hit, maxBytes)));
   }
-  return matchDeps(allDeps);
+  const findings = matchDeps(allDeps);
+  if (options.advisories?.enabled) {
+    return annotateWithAdvisories(findings, allDeps, options.advisories);
+  }
+  return findings;
 }

@@ -31,6 +31,7 @@ interface ScanOptions {
   html?: string;
   failOn?: string;
   allowPrivate?: boolean;
+  advisories?: boolean;
   port?: string | number;
   timeout?: string | number;
 }
@@ -83,8 +84,14 @@ async function runScan(target: string, options: ScanOptions): Promise<void> {
             allowPrivate: options.allowPrivate,
           })
         : parsed.kind === "path"
-          ? await scanLocalDir(parsed.dir)
-          : await scanClonedRepo(parsed.url);
+          ? await scanLocalDir(parsed.dir, Boolean(options.advisories))
+          : await scanClonedRepo(parsed.url, Boolean(options.advisories));
+
+    if (options.advisories && parsed.kind !== "host") {
+      stderr(
+        "cryptosweep: --advisories posts flagged, version-pinned dependencies to api.osv.dev for a known-CVE lookup.\n",
+      );
+    }
 
     const report = buildReport(target, findings);
 
@@ -136,15 +143,18 @@ function describeError(err: unknown): string {
   return text && text !== "[object Object]" ? text : "unknown error";
 }
 
-async function scanLocalDir(dir: string): Promise<Finding[]> {
-  const [source, deps] = await Promise.all([scanSource(dir), scanDeps(dir)]);
+async function scanLocalDir(dir: string, advisories = false): Promise<Finding[]> {
+  const [source, deps] = await Promise.all([
+    scanSource(dir),
+    scanDeps(dir, advisories ? { advisories: { enabled: true } } : {}),
+  ]);
   return [...source, ...deps];
 }
 
-async function scanClonedRepo(url: string): Promise<Finding[]> {
+async function scanClonedRepo(url: string, advisories = false): Promise<Finding[]> {
   const repo = await cloneRepo(url);
   try {
-    return await scanLocalDir(repo.dir);
+    return await scanLocalDir(repo.dir, advisories);
   } finally {
     await repo.cleanup();
   }
@@ -208,6 +218,7 @@ cli
   .option("--html <file>", "Write a self-contained interactive HTML report to <file>")
   .option("--fail-on <severity>", "Exit non-zero if any finding is at/above this severity")
   .option("--allow-private", "Allow scanning non-public addresses (localhost, RFC 1918)")
+  .option("--advisories", "Opt-in: cross-reference flagged deps against OSV.dev for known CVEs (network, off by default)")
   .option("--port <port>", "TLS port (defaults to 443 or the port in the target)")
   .option("--timeout <ms>", "TLS handshake timeout in milliseconds (default 10000)")
   .example("  cryptosweep scan https://www.example.com --out report.json --cbom cbom.json")
