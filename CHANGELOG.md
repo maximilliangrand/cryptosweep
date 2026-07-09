@@ -32,6 +32,16 @@ follow [Semantic Versioning](https://semver.org/).
 - **Version-aware dependency matching**: registry entries can record a `fixedIn`
   version; installs below it are flagged, installs at or above are downgraded to
   transitional.
+- **AST-based source scanner** for JavaScript and TypeScript. Weak-crypto and JWT
+  matches now come from the parsed syntax tree (via @babel/parser, inlined at
+  build time), so a match in a comment, a string, or a locally-shadowed name no
+  longer fires, and an import-resolved call is reported at `confirmed` confidence.
+  The regex sweep remains the fallback for other languages and parse failures.
+- **Registry provenance**: every dependency entry carries at least one citation,
+  and coverage expanded across npm, PyPI, and crates.io.
+- **Opt-in OSV.dev advisory cross-reference** (`--advisories`, off by default):
+  annotates flagged, pinned dependencies with known CVE advisories as a distinct
+  dimension from the post-quantum verdict. Fails closed to the offline result.
 
 ### Changed
 
