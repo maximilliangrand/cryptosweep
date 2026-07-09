@@ -14,6 +14,7 @@ export type {
 export { buildReport, failsThreshold, normalizeFinding, toJson, toMarkdown } from "./report";
 export { toCbom, describeAlgorithm } from "./output/cbom";
 export { toSarif } from "./output/sarif";
+export { toHtml } from "./output/viewer";
 export type { KeyType } from "./crypto";
 export {
   REFS,
