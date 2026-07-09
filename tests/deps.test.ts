@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { lookupEntry, REGISTRY } from "../src/scanners/deps/registry";
-import { matchDeps, scanDeps } from "../src/scanners/deps";
+import { extractVersion, matchDeps, scanDeps } from "../src/scanners/deps";
+import type { ParsedDep } from "../src/scanners/deps";
 import { parsePackageJson, parsePnpmLock } from "../src/scanners/deps/parsers/npm";
 import { parsePyproject, parseRequirementsTxt } from "../src/scanners/deps/parsers/python";
 import { parseCargoToml } from "../src/scanners/deps/parsers/cargo";
@@ -82,6 +83,39 @@ describe("cargo parser", () => {
     expect(finding?.pq_status).toBe(cargoEntry?.pq_status);
     // Same name, different ecosystem — must not pull npm/python recommendation.
     expect(finding?.recommendation).toBe(cargoEntry?.recommendation);
+  });
+});
+
+describe("version-aware matching", () => {
+  const rustls = (version: string): ParsedDep[] => [
+    { name: "rustls", version, ecosystem: "cargo", manifestPath: "Cargo.toml" },
+  ];
+
+  it("extractVersion strips range operators to a comparable version", () => {
+    expect(extractVersion("^9.0.0")).toEqual([9, 0, 0]);
+    expect(extractVersion(">=1.2")).toEqual([1, 2]);
+    expect(extractVersion("~=42.0.1")).toEqual([42, 0, 1]);
+    expect(extractVersion("")).toBeNull();
+    expect(extractVersion("latest")).toBeNull();
+  });
+
+  it("flags a rustls install below fixedIn as vulnerable / high confidence", () => {
+    const [f] = matchDeps(rustls("0.21.0"));
+    expect(f?.pq_status).toBe("vulnerable");
+    expect(f?.confidence).toBe("high");
+  });
+
+  it("downgrades a rustls install at/above fixedIn to transitional / info", () => {
+    const [f] = matchDeps(rustls("0.23.5"));
+    expect(f?.pq_status).toBe("transitional");
+    expect(f?.severity).toBe("info");
+    expect(f?.recommendation).toMatch(/at or above 0\.23\.0/);
+  });
+
+  it("flags conservatively at low confidence when the version cannot be resolved", () => {
+    const [f] = matchDeps(rustls(""));
+    expect(f?.pq_status).toBe("vulnerable");
+    expect(f?.confidence).toBe("low");
   });
 });
 

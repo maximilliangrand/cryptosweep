@@ -7,9 +7,10 @@
  */
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
-import type { Finding } from "../report";
+import type { Confidence, Finding, PqStatus, Reference, Severity } from "../report";
 import type { Ecosystem, RegistryEntry } from "./deps/registry";
-import { REGISTRY } from "./deps/registry";
+import { lookupEntry } from "./deps/registry";
+import { REFS } from "../crypto";
 import { parsePackageJson, parsePnpmLock, type ParsedDep } from "./deps/parsers/npm";
 import { parsePyproject, parseRequirementsTxt } from "./deps/parsers/python";
 import { parseCargoToml } from "./deps/parsers/cargo";
@@ -49,20 +50,89 @@ class IdAllocator {
   }
 }
 
-function registryLookup(name: string, ecosystem: Ecosystem): RegistryEntry | undefined {
-  return REGISTRY.find((entry) => entry.name === name && entry.ecosystem === ecosystem);
+/** Extract a comparable numeric version from a manifest spec (e.g. "^9.0.0" -> [9,0,0]). */
+export function extractVersion(spec: string | undefined): number[] | null {
+  if (!spec) return null;
+  const match = /(\d+(?:\.\d+)*)/.exec(spec);
+  if (!match?.[1]) return null;
+  const parts = match[1].split(".").map((n) => Number.parseInt(n, 10));
+  return parts.every((n) => Number.isFinite(n)) ? parts : null;
+}
+
+/** Compare two numeric versions. Missing components are treated as 0. */
+function compareVersions(a: number[], b: number[]): number {
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i += 1) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+interface Assessment {
+  severity: Severity;
+  pq_status: PqStatus;
+  confidence: Confidence;
+  recommendation: string;
+}
+
+/**
+ * Assess a dependency against its registry entry, taking the declared version
+ * into account when the entry records a `fixedIn`. Libraries that are classical
+ * by nature (no `fixedIn`) are flagged at every version, as they should be.
+ */
+function assess(dep: ParsedDep, entry: RegistryEntry): Assessment {
+  if (!entry.fixedIn) {
+    return { severity: entry.severity, pq_status: entry.pq_status, confidence: "medium", recommendation: entry.recommendation };
+  }
+  const declared = extractVersion(dep.version);
+  const fixed = extractVersion(entry.fixedIn);
+  if (!declared || !fixed) {
+    return {
+      severity: entry.severity,
+      pq_status: entry.pq_status,
+      confidence: "low",
+      recommendation: `Could not resolve a concrete version; flagged conservatively. The PQ-relevant fix landed in ${entry.name} ${entry.fixedIn}. ${entry.recommendation}`,
+    };
+  }
+  if (compareVersions(declared, fixed) < 0) {
+    return {
+      severity: entry.severity,
+      pq_status: entry.pq_status,
+      confidence: "high",
+      recommendation: `${dep.name} ${dep.version} predates ${entry.fixedIn}. ${entry.recommendation}`,
+    };
+  }
+  return {
+    severity: "info",
+    pq_status: "transitional",
+    confidence: "high",
+    recommendation: `${dep.name} ${dep.version} is at or above ${entry.fixedIn}, which carries the PQ-relevant support — confirm it is enabled in configuration.`,
+  };
+}
+
+function referencesFor(pq: PqStatus): Reference[] {
+  if (pq === "vulnerable") return [REFS.cnsa2, REFS.ir8547];
+  if (pq === "transitional") return [REFS.fips203];
+  return [];
 }
 
 function toFinding(dep: ParsedDep, entry: RegistryEntry, ids: IdAllocator): Finding {
   const versionLabel = dep.version || "*";
+  const a = assess(dep, entry);
   return {
     id: ids.next(),
-    severity: entry.severity,
+    ruleId: `deps/${dep.ecosystem}-${entry.name}`,
+    severity: a.severity,
     category: "deps",
     title: `${entry.name} (${dep.ecosystem}) — ${entry.reason}`,
     evidence: `${dep.manifestPath}:${dep.name}@${versionLabel}`,
-    pq_status: entry.pq_status,
-    recommendation: entry.recommendation,
+    location: { path: dep.manifestPath },
+    pq_status: a.pq_status,
+    confidence: a.confidence,
+    recommendation: a.recommendation,
+    references: referencesFor(a.pq_status),
   };
 }
 
@@ -71,7 +141,7 @@ export function matchDeps(deps: readonly ParsedDep[], ids: IdAllocator = new IdA
   const out: Finding[] = [];
   const seenEvidence = new Set<string>();
   for (const dep of deps) {
-    const entry = registryLookup(dep.name, dep.ecosystem);
+    const entry = lookupEntry(dep.name, dep.ecosystem);
     if (!entry) continue;
     const finding = toFinding(dep, entry, ids);
     if (seenEvidence.has(finding.evidence)) continue;

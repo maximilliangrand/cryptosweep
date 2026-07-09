@@ -23,6 +23,15 @@ export interface RegistryEntry {
   ecosystem: Ecosystem;
   /** Semver / PEP440 / cargo range. Defaults to "*" — see file header. */
   version_range?: string;
+  /**
+   * The first version at which the library's post-quantum-relevant concern is
+   * addressed (e.g. a hybrid KEM group became available). When set, the scanner
+   * only flags installs whose permitted floor is BELOW this version; at or above
+   * it, the finding is downgraded to transitional. Omit for libraries that are
+   * classical by nature at every version (RSA/ECDSA implementations), which are
+   * correctly flagged regardless of version.
+   */
+  fixedIn?: string;
   severity: Severity;
   pq_status: PqStatus;
   reason: string;
@@ -194,12 +203,13 @@ export const REGISTRY: readonly RegistryEntry[] = [
   {
     name: "rustls",
     ecosystem: "cargo",
+    fixedIn: "0.23.0",
     severity: "medium",
-    pq_status: "transitional",
+    pq_status: "vulnerable",
     reason:
-      "Modern TLS stack; recent versions enable the X25519MLKEM768 hybrid group, but older pinned releases are classical-only.",
+      "Modern TLS stack; the X25519MLKEM768 hybrid group is available from 0.23, but older pinned releases are classical-only.",
     recommendation:
-      "Upgrade to a release with hybrid KEM support (X25519MLKEM768) and enable it server- and client-side.",
+      "Upgrade to rustls >= 0.23 with hybrid KEM support (X25519MLKEM768) and enable it server- and client-side.",
   },
   {
     name: "oqs",
