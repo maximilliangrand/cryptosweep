@@ -11,7 +11,10 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { Category, Confidence, Finding, PqStatus, Severity } from "../report";
+import type { Confidence, Finding, Severity } from "../report";
+import { REFS } from "../crypto";
+import { isJsTsFile, jwtAssessment, scanJsAst } from "./source-ast";
+import type { PushFinding, ScanJsResult } from "./source-ast";
 
 const execFileAsync = promisify(execFile);
 
@@ -93,16 +96,18 @@ function lowerSeverity(base: Severity, steps: number): Severity {
 
 /**
  * Effective severity + confidence for a base severity given the file context.
- * `structural` marks findings (like a well-formed PEM key block) whose match is
- * unambiguous even though it came from a regex, those stay high-confidence.
+ * `tier` is the source-context confidence a caller earned: `confirmed` for an
+ * import-resolved AST match, `high` for a distinctive-but-unresolved AST match or
+ * a well-formed PEM block, `medium` for a plain regex match. In docs/tests every
+ * match is de-rated to `low` and its severity dropped two rungs, regardless.
  */
 function calibrate(
   base: Severity,
   context: FileContext,
-  structural = false,
+  tier: Confidence = "medium",
 ): { severity: Severity; confidence: Confidence } {
   if (context === "source") {
-    return { severity: base, confidence: structural ? "high" : "medium" };
+    return { severity: base, confidence: tier };
   }
   return { severity: lowerSeverity(base, 2), confidence: "low" };
 }
@@ -125,24 +130,6 @@ function lineNumber(content: string, index: number): number {
   return line;
 }
 
-function jwtAssessment(alg: string): { severity: Severity; pq: PqStatus; note: string } {
-  if (alg === "none") {
-    return { severity: "critical", pq: "vulnerable", note: 'JWT "alg: none" disables signature verification, remove it.' };
-  }
-  if (alg.startsWith("HS")) {
-    return {
-      severity: "low",
-      pq: "transitional",
-      note: "HMAC JWT is symmetric and quantum-resistant if the key is ≥256-bit; rotate and protect the secret.",
-    };
-  }
-  return {
-    severity: "high",
-    pq: "vulnerable",
-    note: `${alg} relies on RSA/ECDSA signatures broken by Shor's algorithm; plan a PQ-signature migration.`,
-  };
-}
-
 function* matchAll(
   content: string,
   pattern: RegExp,
@@ -161,18 +148,8 @@ export function scanContent(relPath: string, content: string, ids = new IdAlloca
   const context = classifyFile(relPath);
   const at = (index: number): string => `${relPath}:${lineNumber(content, index)}`;
 
-  const push = (
-    prefix: string,
-    baseSeverity: Severity,
-    category: Category,
-    title: string,
-    index: number,
-    pq: PqStatus,
-    recommendation: string,
-    structural = false,
-    algorithm?: string,
-  ): void => {
-    const { severity, confidence } = calibrate(baseSeverity, context, structural);
+  const push: PushFinding = (prefix, baseSeverity, category, title, index, pq, recommendation, opts = {}) => {
+    const { severity, confidence } = calibrate(baseSeverity, context, opts.tier);
     findings.push({
       id: ids.next(prefix),
       severity,
@@ -182,51 +159,59 @@ export function scanContent(relPath: string, content: string, ids = new IdAlloca
       location: { path: relPath, line: lineNumber(content, index) },
       pq_status: pq,
       confidence,
-      algorithm,
+      algorithm: opts.algorithm,
       recommendation,
+      references: opts.references,
     });
   };
 
-  for (const { index, match } of matchAll(content, WEAK_HASH)) {
-    const algo = /^md5$/i.test(match[1] ?? "") ? "MD5" : "SHA-1";
-    push(
-      "SRC",
-      "high",
-      "source",
-      `Weak hash algorithm via node:crypto (${match[1]})`,
-      index,
-      "vulnerable",
-      "Replace MD5/SHA-1 with SHA-256 or SHA-3; both are already collision-broken classically.",
-      false,
-      algo,
-    );
-  }
+  // Structural first-pass for JS/TS. When it parses cleanly it owns hash/cipher/jwt
+  // (already pushed), so the regexes below are skipped for that file to avoid
+  // double counting; anything else falls through to the regex sweep.
+  let ast: ScanJsResult = { used: "fallback", stringRanges: [] };
+  if (isJsTsFile(relPath)) ast = scanJsAst(relPath, content, push);
 
-  for (const { index, match } of matchAll(content, WEAK_CIPHER)) {
-    push(
-      "SRC",
-      "high",
-      "source",
-      `Weak symmetric cipher via node:crypto (${match[1]})`,
-      index,
-      "vulnerable",
-      "Replace DES/3DES/RC4/RC2 with AES-256-GCM and re-key affected data.",
-      false,
-      (match[1] ?? "").toUpperCase(),
-    );
-  }
+  if (ast.used !== "ast") {
+    for (const { index, match } of matchAll(content, WEAK_HASH)) {
+      push(
+        "SRC",
+        "high",
+        "source",
+        `Weak hash algorithm via node:crypto (${match[1]})`,
+        index,
+        "vulnerable",
+        "Replace MD5/SHA-1 with SHA-256 or SHA-3; both are already collision-broken classically.",
+        { algorithm: /^md5$/i.test(match[1] ?? "") ? "MD5" : "SHA-1", references: [REFS.cwe327, REFS.sp800131a] },
+      );
+    }
 
-  if (JWT_USAGE.test(content)) {
-    for (const { index, match } of matchAll(content, JWT_ALG)) {
-      const alg = match[1] ?? "unknown";
-      const { severity, pq, note } = jwtAssessment(alg);
-      push("JWT", severity, "jwt", `JSON Web Token algorithm ${alg}`, index, pq, note, false, `JWT-${alg}`);
+    for (const { index, match } of matchAll(content, WEAK_CIPHER)) {
+      push(
+        "SRC",
+        "high",
+        "source",
+        `Weak symmetric cipher via node:crypto (${match[1]})`,
+        index,
+        "vulnerable",
+        "Replace DES/3DES/RC4/RC2 with AES-256-GCM and re-key affected data.",
+        { algorithm: (match[1] ?? "").toUpperCase(), references: [REFS.cwe327] },
+      );
+    }
+
+    if (JWT_USAGE.test(content)) {
+      for (const { index, match } of matchAll(content, JWT_ALG)) {
+        const alg = match[1] ?? "unknown";
+        const { severity, pq, note } = jwtAssessment(alg);
+        push("JWT", severity, "jwt", `JSON Web Token algorithm ${alg}`, index, pq, note, { algorithm: `JWT-${alg}` });
+      }
     }
   }
 
-  // A well-formed PEM private-key block is structural evidence: unambiguous even
-  // in docs, so it stays high-confidence (only its severity is context-scaled).
+  // PEM keys always run in both paths (a key in a comment is still a leak). When
+  // the AST ran, a key sitting inside a real string/template literal is upgraded
+  // from `high` to `confirmed`.
   for (const { index } of matchAll(content, PRIVATE_KEY)) {
+    const inLiteral = ast.used === "ast" && ast.stringRanges.some(([s, e]) => index >= s && index < e);
     push(
       "KEY",
       "critical",
@@ -235,7 +220,7 @@ export function scanContent(relPath: string, content: string, ids = new IdAlloca
       index,
       "vulnerable",
       "Remove the key from source, rotate it immediately, and load secrets from a vault/KMS.",
-      true,
+      { tier: inLiteral ? "confirmed" : "high" },
     );
   }
 
