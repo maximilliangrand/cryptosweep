@@ -10,10 +10,13 @@ describe("toHtml", () => {
     const report = buildReport("example.com", [], AT);
     const html = toHtml(report);
     expect(html.startsWith("<!doctype html>")).toBe(true);
-    // No external scripts, styles, fonts, or images — everything inlined.
+    // No request-triggering references: everything is inlined. (Bundled license
+    // banners may mention URLs as text; those are not requests, so we check for
+    // the patterns a browser would actually fetch rather than any URL substring.)
     expect(html).not.toMatch(/<script[^>]+src=/i);
     expect(html).not.toMatch(/<link[^>]+href=/i);
-    expect(html).not.toMatch(/https?:\/\/[^"']*\.(js|css|woff2?|png|jpg)/i);
+    expect(html).not.toMatch(/url\(\s*['"]?https?:/i); // external CSS asset
+    expect(html).not.toMatch(/@import\s+(url\()?['"]?https?:/i); // external @import
   });
 
   it("embeds the report as a JSON island", () => {

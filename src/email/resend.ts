@@ -1,6 +1,6 @@
 /**
  * Minimal Resend email client. Wraps POST https://api.resend.com/emails with
- * the global fetch — no SDK dependency.
+ * the global fetch, no SDK dependency.
  */
 
 const RESEND_ENDPOINT = "https://api.resend.com/emails";

@@ -99,11 +99,11 @@ export function certificateSignatureOid(der: Buffer | undefined): string | null 
   const certificate = readTlv(der, 0);
   if (!certificate || certificate.tag !== TAG_SEQUENCE) return null;
 
-  // Element 0: tbsCertificate — read only to find where it ends, then skip it.
+  // Element 0: tbsCertificate, read only to find where it ends, then skip it.
   const tbs = readTlv(der, certificate.contentStart);
   if (!tbs || tbs.tag !== TAG_SEQUENCE || tbs.next > certificate.contentEnd) return null;
 
-  // Element 1: signatureAlgorithm — a SEQUENCE whose first element is the OID.
+  // Element 1: signatureAlgorithm, a SEQUENCE whose first element is the OID.
   const sigAlg = readTlv(der, tbs.next);
   if (!sigAlg || sigAlg.tag !== TAG_SEQUENCE || sigAlg.next > certificate.contentEnd) return null;
 

@@ -27,7 +27,7 @@ function escapeRegex(value: string): string {
 }
 
 function extractInlineTableVersion(value: string): string {
-  // value is like `{ version = "1.0", features = ["..."] }` — possibly without `version` key.
+  // value is like `{ version = "1.0", features = ["..."] }`, possibly without `version` key.
   const versionMatch = /\bversion\s*=\s*["']([^"']+)["']/.exec(value);
   return versionMatch?.[1] ?? "";
 }

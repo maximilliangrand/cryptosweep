@@ -5,13 +5,13 @@
  * we want to flag, along with the PQ posture and the migration recommendation
  * to surface in the report. No I/O.
  *
- * Edit this list as the ecosystem moves — version ranges intentionally default
+ * Edit this list as the ecosystem moves, version ranges intentionally default
  * to "*" because authoritative per-version PQ guidance is still emerging.
  * When unsure of a version cutoff, leave it "*" and explain in `reason`.
  *
  * Sources used while seeding v0.1:
  *   - NIST PQC migration guidance (FIPS 203/204/205, IR 8547 draft).
- *   - CNSA 2.0 (NSA, 2022) — RSA/ECDSA deprecation timeline.
+ *   - CNSA 2.0 (NSA, 2022), RSA/ECDSA deprecation timeline.
  *   - Package maintainers' own README/changelogs (read 2026-05).
  */
 import type { PqStatus, Severity } from "../../report";
@@ -21,7 +21,7 @@ export type Ecosystem = "npm" | "python" | "cargo";
 export interface RegistryEntry {
   name: string;
   ecosystem: Ecosystem;
-  /** Semver / PEP440 / cargo range. Defaults to "*" — see file header. */
+  /** Semver / PEP440 / cargo range. Defaults to "*", see file header. */
   version_range?: string;
   /**
    * The first version at which the library's post-quantum-relevant concern is
@@ -126,7 +126,7 @@ export const REGISTRY: readonly RegistryEntry[] = [
     severity: "high",
     pq_status: "vulnerable",
     reason:
-      "Most pyjwt deployments default to HS256 or rely on RS256/ES256 keys — all classical signature schemes.",
+      "Most pyjwt deployments default to HS256 or rely on RS256/ES256 keys, all classical signature schemes.",
     recommendation:
       "If staying on pyjwt, prefer EdDSA and rotate keys; track ML-DSA support for migration.",
   },
@@ -146,7 +146,7 @@ export const REGISTRY: readonly RegistryEntry[] = [
     severity: "medium",
     pq_status: "vulnerable",
     reason:
-      "Wraps OpenSSL X.509/TLS — almost always used with RSA/ECDSA chains today.",
+      "Wraps OpenSSL X.509/TLS, almost always used with RSA/ECDSA chains today.",
     recommendation:
       "Move TLS / X.509 work to OpenSSL 3.5+ via `cryptography`; pilot hybrid KEMs (X25519MLKEM768).",
   },
@@ -166,7 +166,7 @@ export const REGISTRY: readonly RegistryEntry[] = [
     severity: "info",
     pq_status: "transitional",
     reason:
-      "Open Quantum Safe Python bindings (liboqs). Already PQ but treat as transitional — algorithm zoo is pre-NIST-final.",
+      "Open Quantum Safe Python bindings (liboqs). Already PQ but treat as transitional, algorithm zoo is pre-NIST-final.",
     recommendation:
       "Prefer NIST-standardized algorithms (ML-KEM, ML-DSA, SLH-DSA) and pin liboqs versions.",
   },
@@ -217,7 +217,7 @@ export const REGISTRY: readonly RegistryEntry[] = [
     severity: "info",
     pq_status: "transitional",
     reason:
-      "Open Quantum Safe Rust bindings — already PQ, but pre-NIST-final algorithm set; treat as transitional.",
+      "Open Quantum Safe Rust bindings, already PQ, but pre-NIST-final algorithm set; treat as transitional.",
     recommendation:
       "Prefer NIST-standardized algorithms (ML-KEM, ML-DSA, SLH-DSA) once available in stable form.",
   },

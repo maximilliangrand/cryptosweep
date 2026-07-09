@@ -114,7 +114,7 @@ async function runScan(target: string, options: ScanOptions): Promise<void> {
         throw new Error(`--fail-on must be one of critical|high|medium|low|info (got "${options.failOn}")`);
       }
       if (failsThreshold(report, threshold as Severity)) {
-        stderr(`cryptosweep: findings at or above "${threshold}" — failing (exit 2).\n`);
+        stderr(`cryptosweep: findings at or above "${threshold}", failing (exit 2).\n`);
         process.exitCode = 2;
       }
     }
@@ -178,7 +178,7 @@ async function runEmail(options: EmailOptions): Promise<void> {
     if (!apiKey) throw new Error("RESEND_API_KEY is not set");
     const from = options.from ?? process.env.SCAN_FROM_EMAIL ?? DEFAULT_FROM;
     const report = await loadReport(options.report);
-    const subject = options.subject ?? `cryptosweep PQ readiness report — ${report.target}`;
+    const subject = options.subject ?? `cryptosweep PQ readiness report, ${report.target}`;
     const result = await sendEmail({
       apiKey,
       from,

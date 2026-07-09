@@ -45,7 +45,7 @@ function renderFindingHtml(finding: Finding): string {
   const color = SEVERITY_COLOR[finding.severity];
   return [
     `<div style="margin:0 0 16px 0;padding:12px 14px;border-left:4px solid ${color};background:#f8fafc;">`,
-    `<div style="font:600 14px/1.4 -apple-system,Segoe UI,sans-serif;color:#0f172a;">${escapeHtml(finding.id)} — ${escapeHtml(finding.title)}</div>`,
+    `<div style="font:600 14px/1.4 -apple-system,Segoe UI,sans-serif;color:#0f172a;">${escapeHtml(finding.id)}, ${escapeHtml(finding.title)}</div>`,
     `<div style="font:13px/1.5 -apple-system,Segoe UI,sans-serif;color:#334155;margin-top:4px;">`,
     `<strong>Evidence:</strong> ${escapeHtml(finding.evidence)}<br/>`,
     `<strong>PQ status:</strong> ${escapeHtml(finding.pq_status)}<br/>`,

@@ -4,8 +4,8 @@
  * Connects to a host (via an injectable probe so tests stay offline), then
  * classifies the certificate chain and negotiated parameters. Every leaf key is
  * typed from a parsed `KeyObject` and every signature algorithm from the
- * certificate's actual ASN.1 `signatureAlgorithm` field — never from guessing at
- * bytes — so a "vulnerable" verdict is defensible to an auditor.
+ * certificate's actual ASN.1 `signatureAlgorithm` field, never from guessing at
+ * bytes, so a "vulnerable" verdict is defensible to an auditor.
  */
 import { connect as tlsConnect } from "node:tls";
 import type { DetailedPeerCertificate } from "node:tls";
@@ -154,7 +154,7 @@ function signaturePosture(name: string): {
       pq_status: "unknown",
       confidence: "low",
       references: [],
-      recommendation: "Signature algorithm OID was not recognized — verify the certificate manually.",
+      recommendation: "Signature algorithm OID was not recognized, verify the certificate manually.",
     };
   }
   if (/^ML-DSA|^SLH-DSA/i.test(name)) {
@@ -163,7 +163,7 @@ function signaturePosture(name: string): {
       pq_status: "safe",
       confidence: "confirmed",
       references: [REFS.fips204, REFS.fips205],
-      recommendation: "Post-quantum signature already in use — keep it and track CA/ecosystem interop.",
+      recommendation: "Post-quantum signature already in use, keep it and track CA/ecosystem interop.",
     };
   }
   if (/sha1/i.test(name)) {
@@ -200,7 +200,7 @@ function evaluateProtocol(protocol: string | null, evidence: string): Finding | 
       references: [REFS.hybridKex],
       recommendation:
         protocol === "TLSv1.3"
-          ? "TLS 1.3 is required for hybrid post-quantum key exchange — keep it enabled."
+          ? "TLS 1.3 is required for hybrid post-quantum key exchange, keep it enabled."
           : "Upgrade to TLS 1.3 to enable hybrid post-quantum key exchange (X25519MLKEM768).",
     };
   }
@@ -267,7 +267,7 @@ function evaluateHybridKex(result: TlsScanResult, evidence: string): Finding {
       algorithm: HYBRID_GROUP,
       references: [REFS.hybridKex, REFS.fips203],
       recommendation:
-        "Hybrid KEX available — keep it enabled and track migration to standalone ML-KEM once mandated.",
+        "Hybrid KEX available, keep it enabled and track migration to standalone ML-KEM once mandated.",
     };
   }
   if (result.hybridKex === "unsupported") {
@@ -296,7 +296,7 @@ function evaluateHybridKex(result: TlsScanResult, evidence: string): Finding {
       confidence: "high",
       algorithm: result.groupName ?? "hybrid-kex",
       references: [REFS.hybridKex, REFS.fips203],
-      recommendation: "Hybrid KEX in place — track migration to standalone ML-KEM once mandated.",
+      recommendation: "Hybrid KEX in place, track migration to standalone ML-KEM once mandated.",
     };
   }
   if (result.groupName) {
@@ -326,7 +326,7 @@ function evaluateHybridKex(result: TlsScanResult, evidence: string): Finding {
   };
 }
 
-/** Analyze a completed handshake and return findings. Pure — drives the tests. */
+/** Analyze a completed handshake and return findings. Pure, drives the tests. */
 export function analyzeTls(result: TlsScanResult, target = "tls", now: Date = new Date()): Finding[] {
   const findings: Finding[] = [];
   const leaf = result.chain[0];
@@ -501,7 +501,7 @@ function probeHybridSupport(host: string, port: number, timeoutMs: number): Prom
         },
       );
     } catch {
-      // Local OpenSSL does not know the group name — cannot probe.
+      // Local OpenSSL does not know the group name, cannot probe.
       done("unknown");
       return;
     }
@@ -509,7 +509,7 @@ function probeHybridSupport(host: string, port: number, timeoutMs: number): Prom
       const code = err.code ?? "";
       const message = err.message ?? String(err);
       if (/^(ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE)$/.test(code)) {
-        done("unknown"); // transport-level problem — inconclusive
+        done("unknown"); // transport-level problem, inconclusive
       } else if (/ERR_SSL|handshake|alert|curve|group|no protocols|version|unsupported/i.test(`${code} ${message}`)) {
         done("unsupported"); // server actively refused the hybrid group
       } else {

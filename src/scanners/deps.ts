@@ -108,7 +108,7 @@ function assess(dep: ParsedDep, entry: RegistryEntry): Assessment {
     severity: "info",
     pq_status: "transitional",
     confidence: "high",
-    recommendation: `${dep.name} ${dep.version} is at or above ${entry.fixedIn}, which carries the PQ-relevant support — confirm it is enabled in configuration.`,
+    recommendation: `${dep.name} ${dep.version} is at or above ${entry.fixedIn}, which carries the PQ-relevant support, confirm it is enabled in configuration.`,
   };
 }
 
@@ -126,7 +126,7 @@ function toFinding(dep: ParsedDep, entry: RegistryEntry, ids: IdAllocator): Find
     ruleId: `deps/${dep.ecosystem}-${entry.name}`,
     severity: a.severity,
     category: "deps",
-    title: `${entry.name} (${dep.ecosystem}) — ${entry.reason}`,
+    title: `${entry.name} (${dep.ecosystem}): ${entry.reason}`,
     evidence: `${dep.manifestPath}:${dep.name}@${versionLabel}`,
     location: { path: dep.manifestPath },
     pq_status: a.pq_status,
