@@ -15,6 +15,7 @@ import { buildReport, failsThreshold, toJson, toMarkdown } from "./report";
 import type { Finding, Report, Severity } from "./report";
 import { toCbom } from "./output/cbom";
 import { toSarif } from "./output/sarif";
+import { toHtml } from "./output/viewer";
 import { scanTls } from "./scanners/tls";
 import { cloneRepo, scanSource } from "./scanners/source";
 import { scanDeps } from "./scanners/deps";
@@ -27,6 +28,7 @@ interface ScanOptions {
   md?: string;
   cbom?: string;
   sarif?: string;
+  html?: string;
   failOn?: string;
   port?: string | number;
   timeout?: string | number;
@@ -88,8 +90,11 @@ async function runScan(target: string, options: ScanOptions): Promise<void> {
     if (options.md) await writeFile(options.md, `${toMarkdown(report)}\n`, "utf8");
     if (options.cbom) await writeFile(options.cbom, `${toCbom(report)}\n`, "utf8");
     if (options.sarif) await writeFile(options.sarif, `${toSarif(report)}\n`, "utf8");
+    if (options.html) await writeFile(options.html, toHtml(report), "utf8");
 
-    const wroteFile = Boolean(options.out || options.md || options.cbom || options.sarif);
+    const wroteFile = Boolean(
+      options.out || options.md || options.cbom || options.sarif || options.html,
+    );
     if (!wroteFile) {
       stdout(`${toMarkdown(report)}\n`);
     } else {
@@ -186,6 +191,7 @@ cli
   .option("--md <file>", "Write the Markdown report to <file>")
   .option("--cbom <file>", "Write a CycloneDX 1.6 CBOM to <file>")
   .option("--sarif <file>", "Write a SARIF 2.1.0 log to <file> (for CI / code scanning)")
+  .option("--html <file>", "Write a self-contained interactive HTML report to <file>")
   .option("--fail-on <severity>", "Exit non-zero if any finding is at/above this severity")
   .option("--port <port>", "TLS port (defaults to 443 or the port in the target)")
   .option("--timeout <ms>", "TLS handshake timeout in milliseconds (default 10000)")

@@ -157,6 +157,7 @@ export function scanContent(relPath: string, content: string, ids = new IdAlloca
     pq: PqStatus,
     recommendation: string,
     structural = false,
+    algorithm?: string,
   ): void => {
     const { severity, confidence } = calibrate(baseSeverity, context, structural);
     findings.push({
@@ -168,11 +169,13 @@ export function scanContent(relPath: string, content: string, ids = new IdAlloca
       location: { path: relPath, line: lineNumber(content, index) },
       pq_status: pq,
       confidence,
+      algorithm,
       recommendation,
     });
   };
 
   for (const { index, match } of matchAll(content, WEAK_HASH)) {
+    const algo = /^md5$/i.test(match[1] ?? "") ? "MD5" : "SHA-1";
     push(
       "SRC",
       "high",
@@ -181,6 +184,8 @@ export function scanContent(relPath: string, content: string, ids = new IdAlloca
       index,
       "vulnerable",
       "Replace MD5/SHA-1 with SHA-256 or SHA-3; both are already collision-broken classically.",
+      false,
+      algo,
     );
   }
 
@@ -193,6 +198,8 @@ export function scanContent(relPath: string, content: string, ids = new IdAlloca
       index,
       "vulnerable",
       "Replace DES/3DES/RC4/RC2 with AES-256-GCM and re-key affected data.",
+      false,
+      (match[1] ?? "").toUpperCase(),
     );
   }
 
@@ -200,7 +207,7 @@ export function scanContent(relPath: string, content: string, ids = new IdAlloca
     for (const { index, match } of matchAll(content, JWT_ALG)) {
       const alg = match[1] ?? "unknown";
       const { severity, pq, note } = jwtAssessment(alg);
-      push("JWT", severity, "jwt", `JSON Web Token algorithm ${alg}`, index, pq, note);
+      push("JWT", severity, "jwt", `JSON Web Token algorithm ${alg}`, index, pq, note, false, `JWT-${alg}`);
     }
   }
 

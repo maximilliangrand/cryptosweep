@@ -28,6 +28,12 @@ interface AlgorithmDescriptor {
 /** Classify a canonical algorithm label into CycloneDX crypto vocabulary. */
 export function describeAlgorithm(label: string): AlgorithmDescriptor {
   const l = label.toLowerCase();
+  // JWT signature algorithms (JWT-RS256, JWT-HS256, …).
+  if (/^jwt-hs/.test(l)) return { primitive: "mac", nistQuantumSecurityLevel: 1 };
+  if (/^jwt-(rs|ps)/.test(l)) return { primitive: "signature", nistQuantumSecurityLevel: 0, oid: "1.2.840.113549.1.1.1" };
+  if (/^jwt-es/.test(l)) return { primitive: "signature", nistQuantumSecurityLevel: 0, oid: "1.2.840.10045.2.1" };
+  if (/^jwt-eddsa/.test(l)) return { primitive: "signature", nistQuantumSecurityLevel: 0, oid: "1.3.101.112" };
+  if (/^jwt-/.test(l)) return { primitive: "unknown", nistQuantumSecurityLevel: 0 };
   if (/^ml-dsa/.test(l)) {
     const level = l.includes("87") ? 5 : l.includes("65") ? 3 : 2;
     return { primitive: "signature", nistQuantumSecurityLevel: level, parameterSetIdentifier: label };
