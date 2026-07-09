@@ -9,10 +9,12 @@
  */
 import { connect as tlsConnect } from "node:tls";
 import type { DetailedPeerCertificate } from "node:tls";
+import { isIP } from "node:net";
 import { X509Certificate } from "node:crypto";
 import { certificateSignatureOid, signatureAlgorithmName } from "../asn1";
 import { REFS, curveFriendlyName, keyAlgorithmLabel, keyPosture } from "../crypto";
 import type { KeyType } from "../crypto";
+import { assertTargetAllowed } from "../net-guard";
 import type { Confidence, Finding, PqStatus, Reference, Severity } from "../report";
 
 export type { KeyType } from "../crypto";
@@ -58,6 +60,8 @@ export interface TlsScanOptions {
   port?: number;
   timeoutMs?: number;
   probe?: TlsProbe;
+  /** Allow scanning non-public addresses (localhost, RFC 1918). Off by default. */
+  allowPrivate?: boolean;
 }
 
 const HYBRID_KEX = /MLKEM|KYBER/i;
@@ -430,7 +434,8 @@ function handshake(host: string, port: number, timeoutMs: number): Promise<Omit<
       {
         host,
         port,
-        servername: host,
+        // SNI must be a hostname; Node rejects an IP literal as servername.
+        ...(isIP(host) ? {} : { servername: host }),
         rejectUnauthorized: false,
         ALPNProtocols: ["h2", "http/1.1"],
       },
@@ -483,7 +488,13 @@ function probeHybridSupport(host: string, port: number, timeoutMs: number): Prom
     let socket: ReturnType<typeof tlsConnect>;
     try {
       socket = tlsConnect(
-        { host, port, servername: host, rejectUnauthorized: false, ecdhCurve: HYBRID_GROUP },
+        {
+          host,
+          port,
+          ...(isIP(host) ? {} : { servername: host }),
+          rejectUnauthorized: false,
+          ecdhCurve: HYBRID_GROUP,
+        },
         () => {
           done("supported");
           socket.end();
@@ -526,6 +537,8 @@ export async function scanTls(host: string, options: TlsScanOptions = {}): Promi
   const port = options.port ?? 443;
   const timeoutMs = options.timeoutMs ?? 10_000;
   const probe = options.probe ?? defaultProbe;
+  // Only guard the real network path; an injected probe is trusted (and offline).
+  if (!options.probe) await assertTargetAllowed(host, options.allowPrivate);
   const result = await probe(host, port, timeoutMs);
   return analyzeTls(result, `${host}:${port}`);
 }

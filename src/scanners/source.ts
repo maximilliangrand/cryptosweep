@@ -20,7 +20,20 @@ export interface SourceScanOptions {
   ignoreDirs?: string[];
   /** Files larger than this (bytes) are skipped. */
   maxFileBytes?: number;
+  /** Maximum number of files to scan before stopping (bounds a hostile repo). */
+  maxFiles?: number;
+  /** Maximum total bytes to read before stopping. */
+  maxTotalBytes?: number;
 }
+
+interface WalkBudget {
+  files: number;
+  bytes: number;
+  truncated: boolean;
+}
+
+const DEFAULT_MAX_FILES = 25_000;
+const DEFAULT_MAX_TOTAL_BYTES = 300_000_000;
 
 const DEFAULT_IGNORE_DIRS = new Set([
   "node_modules",
@@ -252,17 +265,24 @@ async function walk(
   maxFileBytes: number,
   ids: IdAllocator,
   findings: Finding[],
+  budget: WalkBudget,
 ): Promise<void> {
   const entries = await readdir(rootDir, { withFileTypes: true });
   for (const entry of entries) {
+    if (budget.files <= 0 || budget.bytes <= 0) {
+      budget.truncated = true;
+      return;
+    }
     if (entry.isSymbolicLink()) continue;
     const full = join(rootDir, entry.name);
     if (entry.isDirectory()) {
       if (ignoreDirs.has(entry.name)) continue;
-      await walk(full, ignoreDirs, maxFileBytes, ids, findings);
+      await walk(full, ignoreDirs, maxFileBytes, ids, findings, budget);
     } else if (entry.isFile()) {
       const buffer = await readFile(full);
       if (buffer.byteLength > maxFileBytes || isProbablyBinary(buffer)) continue;
+      budget.files -= 1;
+      budget.bytes -= buffer.byteLength;
       const relPath = full.startsWith(rootDir) ? full.slice(rootDir.length).replace(/^[/\\]/, "") : full;
       findings.push(...scanContent(relPath || entry.name, buffer.toString("utf8"), ids));
     }
@@ -274,7 +294,26 @@ export async function scanSource(rootDir: string, options: SourceScanOptions = {
   const ignoreDirs = new Set([...DEFAULT_IGNORE_DIRS, ...(options.ignoreDirs ?? [])]);
   const maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
   const findings: Finding[] = [];
-  await walk(rootDir, ignoreDirs, maxFileBytes, new IdAllocator(), findings);
+  const budget: WalkBudget = {
+    files: options.maxFiles ?? DEFAULT_MAX_FILES,
+    bytes: options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES,
+    truncated: false,
+  };
+  await walk(rootDir, ignoreDirs, maxFileBytes, new IdAllocator(), findings, budget);
+  if (budget.truncated) {
+    findings.push({
+      id: "CSW-SRC-000",
+      ruleId: "source/scan-truncated",
+      severity: "info",
+      category: "source",
+      title: "Source scan stopped at a resource limit — coverage is incomplete",
+      evidence: `${rootDir} (file or byte cap reached)`,
+      pq_status: "unknown",
+      confidence: "confirmed",
+      recommendation:
+        "Some files were not analyzed. Raise maxFiles/maxTotalBytes or scan subdirectories individually for full coverage.",
+    });
+  }
   return findings;
 }
 

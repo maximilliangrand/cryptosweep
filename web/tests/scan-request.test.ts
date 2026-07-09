@@ -100,4 +100,19 @@ describe("POST /api/scan-request", () => {
     const body = (await blocked.json()) as { error: string };
     expect(body.error).toBe("rate_limited");
   });
+
+  it("enforces the limit atomically under a concurrent burst (no race leak)", async () => {
+    const headers = { "CF-Connecting-IP": "198.51.100.77" };
+    // Fire 20 requests concurrently. A read-modify-write counter would let more
+    // than 5 through; the Durable Object serializes them, so exactly 5 pass.
+    const responses = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        postForm({ email: `burst${i}@example.com`, target: "example.com", company_url: "" }, headers),
+      ),
+    );
+    const accepted = responses.filter((r) => r.status === 202).length;
+    const limited = responses.filter((r) => r.status === 429).length;
+    expect(accepted).toBe(5);
+    expect(limited).toBe(15);
+  });
 });

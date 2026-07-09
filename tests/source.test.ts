@@ -65,6 +65,13 @@ describe("scanSource (fixture directory)", () => {
     const findings = await scanSource(root);
     expect(findings.every((f) => !f.evidence.includes("node_modules"))).toBe(true);
   });
+
+  it("emits an explicit truncation finding when the file budget is exhausted", async () => {
+    const findings = await scanSource(root, { maxFiles: 1 });
+    const truncated = findings.find((f) => f.title.includes("resource limit"));
+    expect(truncated).toBeDefined();
+    expect(truncated?.severity).toBe("info");
+  });
 });
 
 describe("scanContent (unit)", () => {

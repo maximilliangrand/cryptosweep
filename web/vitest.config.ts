@@ -13,6 +13,7 @@ export default defineConfig({
         compatibilityDate: "2026-05-01",
         d1Databases: ["DB"],
         kvNamespaces: ["RL_KV"],
+        durableObjects: { RATE_LIMITER: "RateLimiter" },
         bindings: {
           NODE_ENV: "test",
           IP_HASH_SECRET: "test-secret-not-for-prod",
