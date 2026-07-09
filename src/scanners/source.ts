@@ -11,7 +11,7 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { Category, Finding, PqStatus, Severity } from "../report";
+import type { Category, Confidence, Finding, PqStatus, Severity } from "../report";
 
 const execFileAsync = promisify(execFile);
 
@@ -41,8 +41,58 @@ const WEAK_CIPHER =
   /\bcreate(?:Cipher|Decipher)(?:iv)?\s*\(\s*["'`]([a-z0-9_-]*(?:des|rc4|rc2)[a-z0-9_-]*)["'`]/gi;
 const JWT_ALG = /["'`](HS256|HS384|HS512|RS256|RS384|RS512|ES256|ES384|ES512|PS256|PS384|PS512|EdDSA|none)["'`]/g;
 const JWT_USAGE = /jsonwebtoken|\bjwt\s*\.\s*(?:sign|verify|decode)/i;
-const PRIVATE_KEY = /-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY-----/g;
+/**
+ * A private-key block is only flagged when it has a real base64 body between the
+ * BEGIN/END markers. A bare header or a `...`-elided snippet (as in READMEs and
+ * docs) does not match — that alone kills the most common false critical.
+ */
+const PRIVATE_KEY =
+  /-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY-----[\r\n]+[A-Za-z0-9+/=\r\n]{40,}-----END/g;
 const PUBLIC_KEY = /-----BEGIN (?:RSA )?PUBLIC KEY-----/g;
+
+/**
+ * Where a match was found. A weak primitive in a real source file is a live code
+ * path; the same string in documentation or a test fixture is usually an
+ * example, so we lower its severity and mark the finding low-confidence rather
+ * than crying wolf. Recall is preserved — nothing is dropped, only calibrated.
+ */
+type FileContext = "source" | "docs" | "test";
+
+function classifyFile(relPath: string): FileContext {
+  const p = relPath.toLowerCase();
+  if (/\.(md|mdx|markdown|rst|txt|adoc)$/.test(p) || /(^|\/)docs?\//.test(p)) return "docs";
+  if (
+    /\.(test|spec|stories)\.[a-z0-9]+$/.test(p) ||
+    /(^|\/)(tests?|__tests__|__mocks__|__fixtures__|fixtures?|examples?|e2e|mocks?)\//.test(p)
+  ) {
+    return "test";
+  }
+  return "source";
+}
+
+const SEVERITY_LADDER: readonly Severity[] = ["critical", "high", "medium", "low", "info"];
+
+/** Drop a severity by `steps` rungs (clamped), used to de-rate matches in docs/tests. */
+function lowerSeverity(base: Severity, steps: number): Severity {
+  const index = SEVERITY_LADDER.indexOf(base);
+  return SEVERITY_LADDER[Math.min(SEVERITY_LADDER.length - 1, index + steps)] ?? "info";
+}
+
+/**
+ * Effective severity + confidence for a base severity given the file context.
+ * `structural` marks findings (like a well-formed PEM key block) whose match is
+ * unambiguous even though it came from a regex — those stay high-confidence.
+ */
+function calibrate(
+  base: Severity,
+  context: FileContext,
+  structural = false,
+): { severity: Severity; confidence: Confidence } {
+  if (context === "source") {
+    return { severity: base, confidence: structural ? "high" : "medium" };
+  }
+  return { severity: lowerSeverity(base, 2), confidence: "low" };
+}
 
 class IdAllocator {
   private counters = new Map<string, number>();
@@ -95,18 +145,31 @@ function* matchAll(
 /** Scan a single file's content. Pure — drives the source scanner tests. */
 export function scanContent(relPath: string, content: string, ids = new IdAllocator()): Finding[] {
   const findings: Finding[] = [];
+  const context = classifyFile(relPath);
   const at = (index: number): string => `${relPath}:${lineNumber(content, index)}`;
 
   const push = (
     prefix: string,
-    severity: Severity,
+    baseSeverity: Severity,
     category: Category,
     title: string,
     index: number,
     pq: PqStatus,
     recommendation: string,
+    structural = false,
   ): void => {
-    findings.push({ id: ids.next(prefix), severity, category, title, evidence: at(index), pq_status: pq, recommendation });
+    const { severity, confidence } = calibrate(baseSeverity, context, structural);
+    findings.push({
+      id: ids.next(prefix),
+      severity,
+      category,
+      title,
+      evidence: at(index),
+      location: { path: relPath, line: lineNumber(content, index) },
+      pq_status: pq,
+      confidence,
+      recommendation,
+    });
   };
 
   for (const { index, match } of matchAll(content, WEAK_HASH)) {
@@ -141,6 +204,8 @@ export function scanContent(relPath: string, content: string, ids = new IdAlloca
     }
   }
 
+  // A well-formed PEM private-key block is structural evidence: unambiguous even
+  // in docs, so it stays high-confidence (only its severity is context-scaled).
   for (const { index } of matchAll(content, PRIVATE_KEY)) {
     push(
       "KEY",
@@ -150,6 +215,7 @@ export function scanContent(relPath: string, content: string, ids = new IdAlloca
       index,
       "vulnerable",
       "Remove the key from source, rotate it immediately, and load secrets from a vault/KMS.",
+      true,
     );
   }
 

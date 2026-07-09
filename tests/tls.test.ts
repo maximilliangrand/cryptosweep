@@ -1,10 +1,13 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { CertInfo, TlsProbe, TlsScanResult } from "../src/scanners/tls";
-import { analyzeTls, normalizeCert, scanTls, signatureAlgorithmFromDer } from "../src/scanners/tls";
+import { analyzeTls, parseCertificate, scanTls } from "../src/scanners/tls";
 import type { Finding } from "../src/report";
 
-const SHA256_RSA = Buffer.from([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b]);
-const ECDSA_SHA256 = Buffer.from([0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02]);
+function readCert(name: string): Buffer {
+  return readFileSync(fileURLToPath(new URL(`./fixtures/certs/${name}.pem`, import.meta.url)));
+}
 
 function cert(overrides: Partial<CertInfo> = {}): CertInfo {
   return {
@@ -15,6 +18,7 @@ function cert(overrides: Partial<CertInfo> = {}): CertInfo {
     keyBits: 2048,
     curve: null,
     signatureAlgorithm: "sha256WithRSAEncryption",
+    signatureOid: "1.2.840.113549.1.1.11",
     validFrom: "2025-01-01T00:00:00.000Z",
     validTo: "2099-01-01T00:00:00.000Z",
     ...overrides,
@@ -29,36 +33,36 @@ function byId(findings: Finding[], id: string): Finding {
 
 const NOW = new Date("2026-01-01T00:00:00.000Z");
 
-describe("signatureAlgorithmFromDer", () => {
-  it("identifies a known signature OID embedded in DER", () => {
-    const der = Buffer.concat([Buffer.from([0x30, 0x82, 0x01]), SHA256_RSA, Buffer.from([0xff])]);
-    expect(signatureAlgorithmFromDer(der)).toBe("sha256WithRSAEncryption");
-    expect(signatureAlgorithmFromDer(ECDSA_SHA256)).toBe("ecdsa-with-SHA256");
+describe("parseCertificate (real fixtures)", () => {
+  it("types an RSA-2048 / SHA-256 leaf from the KeyObject and ASN.1 signature", () => {
+    const info = parseCertificate(readCert("rsa2048"), true);
+    expect(info).not.toBeNull();
+    expect(info?.keyType).toBe("rsa");
+    expect(info?.keyBits).toBe(2048);
+    expect(info?.signatureAlgorithm).toBe("sha256WithRSAEncryption");
+    expect(info?.signatureOid).toBe("1.2.840.113549.1.1.11");
   });
 
-  it("returns 'unknown' for empty or unrecognized DER", () => {
-    expect(signatureAlgorithmFromDer(undefined)).toBe("unknown");
-    expect(signatureAlgorithmFromDer(Buffer.from([0x00, 0x01, 0x02]))).toBe("unknown");
-  });
-});
-
-describe("normalizeCert", () => {
-  it("normalizes an RSA leaf certificate", () => {
-    const info = normalizeCert(
-      { modulus: "AA".repeat(256), exponent: "010001", bits: 2048, raw: SHA256_RSA, subject: { CN: "leaf" } },
-      true,
-    );
-    expect(info.keyType).toBe("rsa");
-    expect(info.keyBits).toBe(2048);
-    expect(info.signatureAlgorithm).toBe("sha256WithRSAEncryption");
-    expect(info.isLeaf).toBe(true);
+  it("types an EC P-256 leaf with the friendly curve name", () => {
+    const info = parseCertificate(readCert("ec-p256"), true);
+    expect(info?.keyType).toBe("ec");
+    expect(info?.curve).toBe("P-256");
+    expect(info?.signatureAlgorithm).toBe("ecdsaWithSHA256");
   });
 
-  it("normalizes an EC intermediate certificate", () => {
-    const info = normalizeCert({ nistCurve: "P-384", bits: 384, raw: ECDSA_SHA256 }, false);
-    expect(info.keyType).toBe("ec");
-    expect(info.curve).toBe("P-384");
-    expect(info.isLeaf).toBe(false);
+  it("types an Ed25519 leaf as EdDSA — the case the old scanner missed", () => {
+    const info = parseCertificate(readCert("ed25519"), true);
+    expect(info?.keyType).toBe("ed25519");
+    expect(info?.signatureAlgorithm).toBe("Ed25519");
+  });
+
+  it("reads a SHA-1 RSA signature from the ASN.1 field", () => {
+    const info = parseCertificate(readCert("rsa-sha1"), true);
+    expect(info?.signatureAlgorithm).toBe("sha1WithRSAEncryption");
+  });
+
+  it("returns null for non-certificate bytes instead of throwing", () => {
+    expect(parseCertificate(Buffer.from([0x00, 0x01, 0x02, 0x03]), true)).toBeNull();
   });
 });
 
@@ -74,11 +78,40 @@ describe("analyzeTls", () => {
 
     expect(byId(findings, "CSW-TLS-001").pq_status).toBe("vulnerable");
     expect(byId(findings, "CSW-TLS-001").title).toContain("RSA-2048");
+    expect(byId(findings, "CSW-TLS-001").confidence).toBe("confirmed");
     expect(byId(findings, "CSW-TLS-002").pq_status).toBe("vulnerable");
     expect(byId(findings, "CSW-TLS-004").title).toContain("TLSv1.3");
     const hybrid = byId(findings, "CSW-TLS-005");
     expect(hybrid.pq_status).toBe("vulnerable");
     expect(hybrid.severity).toBe("medium");
+  });
+
+  it("classifies an Ed25519 leaf as quantum-vulnerable / high (EdDSA regression guard)", () => {
+    const info = parseCertificate(readCert("ed25519"), true);
+    const result: TlsScanResult = {
+      protocol: "TLSv1.3",
+      cipherName: "TLS_AES_128_GCM_SHA256",
+      groupName: "X25519",
+      chain: info ? [info] : [],
+    };
+    const findings = analyzeTls(result, "ed.example.com:443", NOW);
+    const key = byId(findings, "CSW-TLS-001");
+    expect(key.title).toContain("Ed25519");
+    expect(key.pq_status).toBe("vulnerable");
+    expect(key.severity).toBe("high");
+    expect(key.confidence).toBe("confirmed");
+  });
+
+  it("rates a SHA-1 signature high with a classical-break note (dead-branch regression guard)", () => {
+    const findings = analyzeTls(
+      { protocol: "TLSv1.3", cipherName: null, groupName: "X25519", chain: [cert({ signatureAlgorithm: "sha1WithRSAEncryption" })] },
+      "sha1.example.com:443",
+      NOW,
+    );
+    const sig = byId(findings, "CSW-TLS-002");
+    expect(sig.severity).toBe("high");
+    expect(sig.confidence).toBe("confirmed");
+    expect(sig.recommendation).toMatch(/SHA-1/);
   });
 
   it("recognizes hybrid KEX, an ECDSA key, and an expired cert (edge case)", () => {
@@ -91,7 +124,7 @@ describe("analyzeTls", () => {
           keyType: "ec",
           curve: "P-256",
           keyBits: 256,
-          signatureAlgorithm: "ecdsa-with-SHA256",
+          signatureAlgorithm: "ecdsaWithSHA256",
           validTo: "2020-01-01T00:00:00.000Z",
         }),
         cert({ isLeaf: false, subject: "Example Intermediate CA" }),
@@ -107,6 +140,43 @@ describe("analyzeTls", () => {
     expect(expiry.severity).toBe("high");
     expect(expiry.title).toContain("expired");
     expect(byId(findings, "CSW-TLS-003").title).toContain("intermediate");
+  });
+
+  it("reports unknown (not vulnerable) when the group cannot be determined", () => {
+    const findings = analyzeTls(
+      { protocol: "TLSv1.3", cipherName: null, groupName: null, chain: [cert()] },
+      "x.example.com:443",
+      NOW,
+    );
+    const hybrid = byId(findings, "CSW-TLS-005");
+    expect(hybrid.pq_status).toBe("unknown");
+    expect(hybrid.confidence).toBe("low");
+  });
+
+  it("trusts the active hybrid probe over an unobservable group name", () => {
+    const supported = byId(
+      analyzeTls(
+        { protocol: "TLSv1.3", cipherName: null, groupName: null, hybridKex: "supported", chain: [cert()] },
+        "hy.example.com:443",
+        NOW,
+      ),
+      "CSW-TLS-005",
+    );
+    expect(supported.pq_status).toBe("transitional");
+    expect(supported.confidence).toBe("confirmed");
+    expect(supported.title).toContain("supports hybrid");
+
+    const unsupported = byId(
+      analyzeTls(
+        { protocol: "TLSv1.3", cipherName: null, groupName: null, hybridKex: "unsupported", chain: [cert()] },
+        "cl.example.com:443",
+        NOW,
+      ),
+      "CSW-TLS-005",
+    );
+    expect(unsupported.pq_status).toBe("vulnerable");
+    expect(unsupported.severity).toBe("medium");
+    expect(unsupported.confidence).toBe("confirmed");
   });
 });
 

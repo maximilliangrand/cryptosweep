@@ -2,22 +2,27 @@
 export { VERSION } from "./version";
 export type {
   Category,
+  Confidence,
   Finding,
+  Location,
   PqStatus,
+  Reference,
   Report,
   ReportSummary,
   Severity,
 } from "./report";
-export { buildReport, toJson, toMarkdown } from "./report";
-export type {
-  CertInfo,
-  KeyType,
-  RawCertificate,
-  TlsProbe,
-  TlsScanOptions,
-  TlsScanResult,
-} from "./scanners/tls";
-export { analyzeTls, normalizeCert, scanTls, signatureAlgorithmFromDer } from "./scanners/tls";
+export { buildReport, normalizeFinding, toJson, toMarkdown } from "./report";
+export type { KeyType } from "./crypto";
+export {
+  REFS,
+  curveFriendlyName,
+  isQuantumVulnerableKey,
+  keyAlgorithmLabel,
+  keyPosture,
+} from "./crypto";
+export { certificateSignatureOid, signatureAlgorithmName } from "./asn1";
+export type { CertInfo, TlsProbe, TlsScanOptions, TlsScanResult } from "./scanners/tls";
+export { analyzeTls, parseCertificate, scanTls } from "./scanners/tls";
 export type { ClonedRepo, SourceScanOptions } from "./scanners/source";
 export { cloneRepo, scanContent, scanSource } from "./scanners/source";
 export type { DepsScanOptions, ParsedDep } from "./scanners/deps";

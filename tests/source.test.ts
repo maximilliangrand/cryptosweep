@@ -89,3 +89,53 @@ describe("scanContent (unit)", () => {
     expect(findings.some((f) => f.category === "jwt" && f.severity === "critical")).toBe(true);
   });
 });
+
+describe("scanContent (false-positive calibration)", () => {
+  it("does not flag an elided PEM block in a README as a private key", () => {
+    const readme = [
+      "## Example",
+      "```",
+      "-----BEGIN PRIVATE KEY-----",
+      "...your key here...",
+      "-----END PRIVATE KEY-----",
+      "```",
+    ].join("\n");
+    const findings = scanContent("README.md", readme);
+    expect(findings.filter((f) => f.category === "keys")).toHaveLength(0);
+  });
+
+  it("de-rates a real-looking key shown in documentation instead of crying critical", () => {
+    const doc = [
+      "Here is a sample key:",
+      "-----BEGIN PRIVATE KEY-----",
+      "MIIBOgIBAAJBAKbogusexamplecontentnotarealkeyAAAAAAAAAAAAAAAAAAAAAA",
+      "-----END PRIVATE KEY-----",
+    ].join("\n");
+    const findings = scanContent("docs/setup.md", doc);
+    const key = findings.find((f) => f.category === "keys");
+    expect(key).toBeDefined();
+    expect(key?.severity).not.toBe("critical");
+    expect(key?.confidence).toBe("low");
+  });
+
+  it("de-rates a JWT alg:none appearing in a test file", () => {
+    const spec = 'const jwt = require("jsonwebtoken");\njwt.sign(p, k, { algorithm: "none" });';
+    const findings = scanContent("auth.test.js", spec);
+    const none = findings.find((f) => f.category === "jwt");
+    expect(none).toBeDefined();
+    expect(none?.severity).not.toBe("critical");
+    expect(none?.confidence).toBe("low");
+  });
+
+  it("keeps full confidence and critical severity for a real key in source", () => {
+    const src = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "MIIBOgIBAAJBAKbogusexamplecontentnotarealkeyAAAAAAAAAAAAAAAAAAAAAA",
+      "-----END RSA PRIVATE KEY-----",
+    ].join("\n");
+    const findings = scanContent("src/secrets.ts", src);
+    const key = findings.find((f) => f.category === "keys");
+    expect(key?.severity).toBe("critical");
+    expect(key?.confidence).toBe("high");
+  });
+});
