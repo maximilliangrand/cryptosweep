@@ -2,17 +2,17 @@
 
 **Post-quantum cryptography migration scanner for SaaS companies whose customer data has a multi-decade confidentiality horizon.**
 
-Scans your public surface, your repos, and your dependencies to produce a board-readable PQ-readiness report — with NIST-aligned remediation for every finding.
+Scans your public surface, your repos, and your dependencies to produce a board-readable PQ-readiness report, with NIST-aligned remediation for every finding.
 
 ---
 
 ## TL;DR
 
-`cryptosweep` answers a question every CISO will be asked in 2027–2030:
+`cryptosweep` answers a question every CISO will be asked in 2027-2030:
 
 > *"Are we ready for the post-quantum migration?"*
 
-It inventories the cryptographic primitives a system actually uses (TLS certificates, source-code crypto patterns, dependency manifests) and flags the ones a cryptographically-relevant quantum computer would break — RSA, ECDSA, EdDSA, classical key exchange — so engineering teams can plan a migration to hybrid / ML-KEM / ML-DSA before they have to.
+It inventories the cryptographic primitives a system actually uses (TLS certificates, source-code crypto patterns, dependency manifests) and flags the ones a cryptographically-relevant quantum computer would break (RSA, ECDSA, EdDSA, classical key exchange) so engineering teams can plan a migration to hybrid / ML-KEM / ML-DSA before they have to.
 
 Detection is designed to be defensible, not heuristic where it counts: certificate keys are typed from a parsed `KeyObject`, signature algorithms from the certificate's actual ASN.1 field, and hybrid post-quantum key exchange (X25519MLKEM768) is confirmed by an active capability probe. Every finding carries a confidence level and a NIST/standards citation.
 
@@ -25,8 +25,8 @@ Runs as a Node CLI. Outputs JSON, Markdown, a **CycloneDX 1.6 CBOM**, **SARIF 2.
 Three independent timelines are converging:
 
 1. **NIST has standardized post-quantum primitives.** FIPS 203 (ML-KEM / Kyber), FIPS 204 (ML-DSA / Dilithium), and FIPS 205 (SLH-DSA / SPHINCS+) are final. There is no excuse left to ship only RSA / ECDSA in new systems.
-2. **CNSA 2.0** mandates US federal systems migrate to PQC by ~2030–2035. Every Fortune 500 with federal contracts inherits that deadline. Banks, insurers, hospitals follow.
-3. **"Harvest now, decrypt later"** attacks are real and already happening. Adversaries copy encrypted traffic *today* and decrypt it *when quantum computers arrive*. Any data with > 10-year confidentiality value — legal records, medical histories, M&A deals, IP filings — is already exposed.
+2. **CNSA 2.0** mandates US federal systems migrate to PQC by ~2030-2035. Every Fortune 500 with federal contracts inherits that deadline. Banks, insurers, hospitals follow.
+3. **"Harvest now, decrypt later"** attacks are real and already happening. Adversaries copy encrypted traffic *today* and decrypt it *when quantum computers arrive*. Any data with > 10-year confidentiality value (legal records, medical histories, M&A deals, IP filings) is already exposed.
 
 Most SaaS today still ships RSA-2048 + ECDSA-P256 as TLS defaults. That posture is fine in 2026 and broken by 2035. Cryptosweep finds those primitives so they can be migrated on a deliberate schedule rather than during an emergency.
 
@@ -34,18 +34,18 @@ Most SaaS today still ships RSA-2048 + ECDSA-P256 as TLS defaults. That posture 
 
 ## Who this is for
 
-**Primary ICP — mid-market legal SaaS** (Clio, Filevine, Smokeball, MyCase, PracticePanther tier; 50–500 employees).
+**Primary ICP: mid-market legal SaaS** (Clio, Filevine, Smokeball, MyCase, PracticePanther tier; 50-500 employees).
 
 Legal data is uniquely exposed to harvest-now-decrypt-later because:
-- **30+ year confidentiality horizon** — privileged communications, divorces, criminal records, M&A deal rooms, IP.
-- **ABA Model Rule 1.6(c)** imposes a *duty of technological competence* — including reasonable efforts to prevent unauthorized disclosure of client confidences.
+- **30+ year confidentiality horizon**: privileged communications, divorces, criminal records, M&A deal rooms, IP.
+- **ABA Model Rule 1.6(c)** imposes a *duty of technological competence*, including reasonable efforts to prevent unauthorized disclosure of client confidences.
 - **Federal court systems** (PACER-NG) are moving to PQ-ready crypto; vendors will be required to follow.
 
 **Secondary fits:**
-- **Healthtech SaaS** — HIPAA + multi-decade record retention.
-- **Fintech infrastructure** — PCI + emerging FFIEC PQ guidance.
-- **Defense subcontractors** — directly bound by CNSA 2.0.
-- **Anyone with long-lived encrypted backups** — encrypted-at-rest with classical KEKs is the obvious harvest target.
+- **Healthtech SaaS**: HIPAA + multi-decade record retention.
+- **Fintech infrastructure**: PCI + emerging FFIEC PQ guidance.
+- **Defense subcontractors**: directly bound by CNSA 2.0.
+- **Anyone with long-lived encrypted backups**: encrypted-at-rest with classical KEKs is the obvious harvest target.
 
 If your customer's data still matters in 2040, you are the user.
 
@@ -57,7 +57,7 @@ If your customer's data still matters in 2040, you are the user.
 |---|---|---|
 | **Public TLS** | `tls` | Cert chain, leaf key type/size (from a parsed `KeyObject`), signature algorithm (from the ASN.1 field), and active hybrid-KEX (`X25519MLKEM768`) support probing |
 | **Source code** | `source` | Weak `node:crypto` usage (MD5 / SHA-1 / DES / 3DES / RC4), `jsonwebtoken` algorithms, hardcoded RSA/EC private keys, embedded PEM public keys |
-| **Dependencies** | `deps` | `package.json` / `pnpm-lock.yaml`, `requirements.txt` / `pyproject.toml`, `Cargo.toml` — flagged against an internal registry of PQ-vulnerable libs with NIST-aligned alternatives |
+| **Dependencies** | `deps` | `package.json` / `pnpm-lock.yaml`, `requirements.txt` / `pyproject.toml`, `Cargo.toml`, flagged against an internal registry of PQ-vulnerable libs with NIST-aligned alternatives |
 
 All three run automatically against a local directory or shallow-cloned GitHub repo. TLS-only mode runs against a hostname.
 
@@ -96,7 +96,7 @@ Output goes to stdout as Markdown by default, or to any combination of the outpu
 |---|---|---|
 | `--out` | JSON | The full report, machine-readable |
 | `--md` | Markdown | Human-readable summary + recommendations |
-| `--cbom` | **CycloneDX 1.6 CBOM** | Cryptography Bill of Materials — flows into SBOM / compliance tooling; each asset carries its NIST post-quantum security level |
+| `--cbom` | **CycloneDX 1.6 CBOM** | Cryptography Bill of Materials, flows into SBOM / compliance tooling; each asset carries its NIST post-quantum security level |
 | `--sarif` | **SARIF 2.1.0** | GitHub code scanning and any SARIF-aware CI, with `security-severity` per rule |
 | `--html` | Self-contained HTML | Offline interactive report: filter by severity / PQ status, search, drill into evidence and citations |
 | `--fail-on <sev>` | exit code | Exit `2` if any finding is at/above `critical\|high\|medium\|low\|info` |
@@ -110,14 +110,19 @@ Every finding also carries a `confidence` level (`confirmed` = parsed structure;
 ### `scan <target>`
 
 `<target>` is one of:
-- A hostname or URL (`example.com`, `https://example.com:8443/whatever`) — runs **TLS scanner only**.
-- A GitHub shorthand or URL (`owner/repo`, `https://github.com/owner/repo`) — shallow-clones and runs **TLS (homepage) + source + deps**.
-- A local directory — runs **source + deps**.
+- A hostname or URL (`example.com`, `https://example.com:8443/whatever`), runs **TLS scanner only**.
+- A GitHub shorthand or URL (`owner/repo`, `https://github.com/owner/repo`), shallow-clones and runs **TLS (homepage) + source + deps**.
+- A local directory, runs **source + deps**.
 
 | Option | Description | Default |
 |---|---|---|
 | `--out <file>` | Write JSON report | (none) |
 | `--md <file>` | Write Markdown report | (none) |
+| `--cbom <file>` | Write a CycloneDX 1.6 CBOM | (none) |
+| `--sarif <file>` | Write a SARIF 2.1.0 log | (none) |
+| `--html <file>` | Write a self-contained interactive HTML report | (none) |
+| `--fail-on <severity>` | Exit non-zero if any finding is at/above this severity | (off) |
+| `--allow-private` | Allow scanning non-public addresses (localhost, RFC 1918) | (off) |
 | `--port <port>` | TLS port | 443 (or as in URL) |
 | `--timeout <ms>` | TLS handshake timeout | 10000 |
 
@@ -164,7 +169,7 @@ Real scan of `www.filevine.com` (default Markdown output):
 ```
 
 Note the last row: cryptosweep actively confirmed the server *will* negotiate
-X25519MLKEM768 — the session key exchange already resists harvest-now-decrypt-later,
+X25519MLKEM768, the session key exchange already resists harvest-now-decrypt-later,
 even though the certificate itself is still classical. That distinction is the
 whole point of a per-primitive inventory.
 
@@ -229,7 +234,7 @@ The CLI and the Worker are independent. You can use one without the other.
 
 ## Manual fulfillment workflow (v0.1)
 
-The hosted landing page (`web/`) captures scan requests into Cloudflare D1 and pings Discord on each new entry. Fulfillment is deliberately manual at v0.1 — you stay in the loop on every report sent out, no auto-pipeline.
+The hosted landing page (`web/`) captures scan requests into Cloudflare D1 and pings Discord on each new entry. Fulfillment is deliberately manual at v0.1, you stay in the loop on every report sent out, no auto-pipeline.
 
 1. Discord ping arrives from the Worker with the requester's email + target.
 2. Generate the report:
@@ -240,7 +245,7 @@ The hosted landing page (`web/`) captures scan requests into Cloudflare D1 and p
    ```bash
    node dist/cli.js email --report /tmp/<id>.json --to <email>
    ```
-4. Done — recipient receives the report via Resend within seconds.
+4. Done, recipient receives the report via Resend within seconds.
 
 Full deploy runbook for the Worker (Cloudflare auth, D1, KV, secrets, deploy) lives at [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
@@ -259,23 +264,23 @@ Full deploy runbook for the Worker (Cloudflare auth, D1, KV, secrets, deploy) li
 
 ## Roadmap
 
-**v0.1 (shipped)** — CLI + TLS scanner + source scanner + deps scanner + email send + landing page + Discord webhook + manual fulfillment workflow.
+**v0.1 (shipped)**, CLI + TLS scanner + source scanner + deps scanner + email send + landing page + Discord webhook + manual fulfillment workflow.
 
-**Correctness & interoperability (shipped)** — deterministic certificate typing via `KeyObject` + ASN.1 (EdDSA/DSA/RSA-PSS included), SHA-1 signatures called out distinctly, active hybrid-KEX capability probe, per-finding confidence + NIST citations, context-calibrated source scanning (no false criticals on docs/tests), and **CycloneDX 1.6 CBOM + SARIF 2.1.0 + interactive HTML outputs + a `--fail-on` CI gate**.
+**Correctness & interoperability (shipped)**, deterministic certificate typing via `KeyObject` + ASN.1 (EdDSA/DSA/RSA-PSS included), SHA-1 signatures called out distinctly, active hybrid-KEX capability probe, per-finding confidence + NIST citations, context-calibrated source scanning (no false criticals on docs/tests), and **CycloneDX 1.6 CBOM + SARIF 2.1.0 + interactive HTML outputs + a `--fail-on` CI gate**.
 
-**v0.2 (planned)** — version-aware dependency matching against advisory data (consume the registry's `version_range`), KMS/HSM posture detection, AST-based source analysis to replace the regex first-pass.
+**v0.2 (planned)**, version-aware dependency matching against advisory data (consume the registry's `version_range`), KMS/HSM posture detection, AST-based source analysis to replace the regex first-pass.
 
-**v0.3** — Auto-generated migration PRs (hybrid wrap + dep upgrades), continuous monitoring (scan on every PR open), Slack alerts in addition to Discord.
+**v0.3**, Auto-generated migration PRs (hybrid wrap + dep upgrades), continuous monitoring (scan on every PR open), Slack alerts in addition to Discord.
 
-**v1.0** — Hosted SaaS tier: continuous PQ-readiness scanning across your GitHub org + a Cloudflare account scan, dashboard, billing.
+**v1.0**, Hosted SaaS tier: continuous PQ-readiness scanning across your GitHub org + a Cloudflare account scan, dashboard, billing.
 
 ---
 
 ## Status, scope, and trust
 
-`cryptosweep` is pre-1.0 software, and it tells you how sure it is. The TLS scanner parses certificates with Node's `crypto`/`tls` modules and a minimal ASN.1 reader, so key type, signature algorithm, and hybrid-KEX support are `confirmed`-confidence, not guessed. The source scanner is a regex first-pass (`medium`/`low` confidence, and de-rated in docs/tests to avoid false criticals); it will miss some constructs and is not a substitute for a hand audit — an AST engine is on the roadmap. The dependency registry is hand-curated and currently version-blind (version-range matching is on the roadmap); PRs adding libraries with citations are welcome.
+`cryptosweep` is pre-1.0 software, and it tells you how sure it is. The TLS scanner parses certificates with Node's `crypto`/`tls` modules and a minimal ASN.1 reader, so key type, signature algorithm, and hybrid-KEX support are `confirmed`-confidence, not guessed. The source scanner is a regex first-pass (`medium`/`low` confidence, and de-rated in docs/tests to avoid false criticals); it will miss some constructs and is not a substitute for a hand audit (an AST engine is on the roadmap). The dependency registry is hand-curated and currently version-blind (version-range matching is on the roadmap); PRs adding libraries with citations are welcome.
 
-**This is not a cryptography implementation.** No new primitives. No new protocols. cryptosweep does not encrypt anything — it audits what other code does.
+**This is not a cryptography implementation.** No new primitives. No new protocols. cryptosweep does not encrypt anything, it audits what other code does.
 
 For high-stakes use (regulatory filings, board-level commitments), pair a cryptosweep report with a manual security review from a credentialed cryptographer.
 
@@ -283,7 +288,7 @@ For high-stakes use (regulatory filings, board-level commitments), pair a crypto
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT, see [`LICENSE`](LICENSE).
 
 ---
 
