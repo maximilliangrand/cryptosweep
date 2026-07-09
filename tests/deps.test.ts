@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { lookupEntry, REGISTRY } from "../src/scanners/deps/registry";
 import { extractVersion, matchDeps, scanDeps } from "../src/scanners/deps";
 import type { ParsedDep } from "../src/scanners/deps";
+import { REFS } from "../src/crypto";
 import { parsePackageJson, parsePnpmLock } from "../src/scanners/deps/parsers/npm";
 import { parsePyproject, parseRequirementsTxt } from "../src/scanners/deps/parsers/python";
 import { parseCargoToml } from "../src/scanners/deps/parsers/cargo";
@@ -83,6 +84,43 @@ describe("cargo parser", () => {
     expect(finding?.pq_status).toBe(cargoEntry?.pq_status);
     // Same name, different ecosystem — must not pull npm/python recommendation.
     expect(finding?.recommendation).toBe(cargoEntry?.recommendation);
+  });
+});
+
+describe("registry provenance & expansion", () => {
+  it("gives every vulnerable/transitional entry at least one provenance reference", () => {
+    const missing = REGISTRY.filter(
+      (e) => (e.pq_status === "vulnerable" || e.pq_status === "transitional") && !(e.references && e.references.length),
+    );
+    expect(missing.map((e) => `${e.ecosystem}:${e.name}`)).toEqual([]);
+  });
+
+  it("ensures every fixedIn is a parseable version", () => {
+    for (const e of REGISTRY) {
+      if (e.fixedIn) expect(extractVersion(e.fixedIn), `${e.name} fixedIn`).not.toBeNull();
+    }
+  });
+
+  it("merges entry-specific provenance with the generic standards, deduped", () => {
+    const [f] = matchDeps([{ name: "rustls", version: "0.21.0", ecosystem: "cargo", manifestPath: "Cargo.toml" }]);
+    const labels = (f?.references ?? []).map((r) => r.label);
+    expect(labels).toContain(REFS.hybridKex.label); // entry-specific
+    expect(labels).toContain(REFS.cnsa2.label); // generic (vulnerable)
+    expect(labels).toContain(REFS.ir8547.label);
+    expect(new Set(labels).size).toBe(labels.length); // no duplicate labels
+  });
+
+  it("flags the newly-added libraries with the expected posture", () => {
+    const deps: ParsedDep[] = [
+      { name: "elliptic", version: "6.5.4", ecosystem: "npm", manifestPath: "package.json" },
+      { name: "ecdsa", version: "0.18.0", ecosystem: "python", manifestPath: "requirements.txt" },
+      { name: "ed25519-dalek", version: "2.1.0", ecosystem: "cargo", manifestPath: "Cargo.toml" },
+    ];
+    const findings = matchDeps(deps);
+    expect(findings).toHaveLength(3);
+    expect(findings.every((f) => f.pq_status === "vulnerable")).toBe(true);
+    // Classical-by-nature (no fixedIn) => version-independent medium confidence.
+    expect(findings.every((f) => f.confidence === "medium")).toBe(true);
   });
 });
 
