@@ -1,16 +1,21 @@
 /**
  * TLS posture scanner.
  *
- * Connects to a host on 443 (via an injectable probe so tests stay offline),
- * inspects the certificate chain and negotiated parameters, and flags
- * classical primitives that a cryptographically-relevant quantum computer
- * would break (RSA, ECDSA/EdDSA, non-hybrid key exchange).
+ * Connects to a host (via an injectable probe so tests stay offline), then
+ * classifies the certificate chain and negotiated parameters. Every leaf key is
+ * typed from a parsed `KeyObject` and every signature algorithm from the
+ * certificate's actual ASN.1 `signatureAlgorithm` field — never from guessing at
+ * bytes — so a "vulnerable" verdict is defensible to an auditor.
  */
 import { connect as tlsConnect } from "node:tls";
 import type { DetailedPeerCertificate } from "node:tls";
-import type { Finding, PqStatus, Severity } from "../report";
+import { X509Certificate } from "node:crypto";
+import { certificateSignatureOid, signatureAlgorithmName } from "../asn1";
+import { REFS, curveFriendlyName, keyAlgorithmLabel, keyPosture } from "../crypto";
+import type { KeyType } from "../crypto";
+import type { Confidence, Finding, PqStatus, Reference, Severity } from "../report";
 
-export type KeyType = "rsa" | "ec" | "ed25519" | "ed448" | "unknown";
+export type { KeyType } from "../crypto";
 
 export interface CertInfo {
   subject: string;
@@ -19,18 +24,33 @@ export interface CertInfo {
   keyType: KeyType;
   keyBits: number | null;
   curve: string | null;
+  /** Friendly signature-algorithm name (e.g. "sha256WithRSAEncryption"), or "unknown". */
   signatureAlgorithm: string;
+  /** The parsed signature-algorithm OID, retained as provenance. */
+  signatureOid: string | null;
   validFrom: string;
   validTo: string;
 }
+
+/**
+ * Whether the server will negotiate a hybrid post-quantum key-exchange group.
+ * Determined by an active capability probe, because Node does not expose the
+ * negotiated group for TLS 1.3 sessions.
+ */
+export type HybridSupport = "supported" | "unsupported" | "unknown";
 
 export interface TlsScanResult {
   protocol: string | null;
   cipherName: string | null;
   /** Negotiated key-exchange group, e.g. "X25519", "P-256", "X25519MLKEM768". */
   groupName: string | null;
+  /** Result of actively probing for hybrid PQ key exchange (X25519MLKEM768). */
+  hybridKex?: HybridSupport;
   chain: CertInfo[];
 }
+
+/** The IANA/OpenSSL name of the standardized hybrid group we probe for. */
+const HYBRID_GROUP = "X25519MLKEM768";
 
 export type TlsProbe = (host: string, port: number, timeoutMs: number) => Promise<TlsScanResult>;
 
@@ -40,49 +60,16 @@ export interface TlsScanOptions {
   probe?: TlsProbe;
 }
 
-/** Minimal structural view of Node's PeerCertificate — keeps the analyzer testable. */
-export interface RawCertificate {
-  subject?: Record<string, string> | string;
-  issuer?: Record<string, string> | string;
-  valid_from?: string;
-  valid_to?: string;
-  modulus?: string;
-  exponent?: string;
-  bits?: number;
-  nistCurve?: string;
-  asn1Curve?: string;
-  pubkey?: Buffer;
-  raw?: Buffer;
-}
-
-const SIGNATURE_OIDS: ReadonlyArray<{ name: string; bytes: number[] }> = [
-  { name: "sha256WithRSAEncryption", bytes: [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b] },
-  { name: "sha384WithRSAEncryption", bytes: [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c] },
-  { name: "sha512WithRSAEncryption", bytes: [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0d] },
-  { name: "sha1WithRSAEncryption", bytes: [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x05] },
-  { name: "rsassaPss", bytes: [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a] },
-  { name: "ecdsa-with-SHA256", bytes: [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02] },
-  { name: "ecdsa-with-SHA384", bytes: [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03] },
-  { name: "ecdsa-with-SHA512", bytes: [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x04] },
-  { name: "Ed25519", bytes: [0x2b, 0x65, 0x70] },
-  { name: "Ed448", bytes: [0x2b, 0x65, 0x71] },
-];
-
 const HYBRID_KEX = /MLKEM|KYBER/i;
 
-/** Extract a signature algorithm name by matching known OID byte sequences in the cert DER. */
-export function signatureAlgorithmFromDer(raw: Buffer | undefined): string {
-  if (!raw || raw.length === 0) return "unknown";
-  for (const oid of SIGNATURE_OIDS) {
-    if (raw.indexOf(Buffer.from(oid.bytes)) !== -1) return oid.name;
+/** Extract the common name from an X509Certificate subject/issuer string. */
+function commonName(field: string): string {
+  for (const line of field.split("\n")) {
+    const match = /^\s*CN=(.+?)\s*$/.exec(line);
+    if (match?.[1]) return match[1];
   }
-  return "unknown";
-}
-
-function commonName(field: Record<string, string> | string | undefined): string {
-  if (!field) return "unknown";
-  if (typeof field === "string") return field;
-  return field.CN ?? field.O ?? "unknown";
+  const first = field.split("\n")[0]?.trim();
+  return first && first.length > 0 ? first : "unknown";
 }
 
 function toIso(value: string | undefined): string {
@@ -91,45 +78,107 @@ function toIso(value: string | undefined): string {
   return Number.isNaN(date.getTime()) ? value : date.toISOString();
 }
 
-/** Normalize a raw peer certificate into the scanner-facing shape. */
-export function normalizeCert(raw: RawCertificate, isLeaf: boolean): CertInfo {
-  let keyType: KeyType = "unknown";
-  let keyBits: number | null = raw.bits ?? null;
-  let curve: string | null = null;
+/** Standard key sizes for algorithms whose strength is fixed, not parameterized. */
+function fixedKeyBits(keyType: KeyType): number | null {
+  if (keyType === "ed25519") return 256;
+  if (keyType === "ed448") return 456;
+  return null;
+}
 
-  if (raw.modulus && raw.exponent) {
-    keyType = "rsa";
-    keyBits = raw.bits ?? raw.modulus.length * 4;
-  } else if (raw.nistCurve || raw.asn1Curve) {
-    keyType = "ec";
-    curve = raw.nistCurve ?? raw.asn1Curve ?? null;
+const RECOGNIZED_KEY_TYPES: ReadonlySet<string> = new Set([
+  "rsa",
+  "rsa-pss",
+  "dsa",
+  "ec",
+  "ed25519",
+  "ed448",
+]);
+
+/**
+ * Parse a DER certificate into the scanner-facing shape using Node's X.509 and
+ * KeyObject APIs plus our ASN.1 signature reader. Returns null if the bytes are
+ * not a parseable certificate (a hostile or truncated chain never throws).
+ */
+export function parseCertificate(der: Buffer, isLeaf: boolean): CertInfo | null {
+  let x509: X509Certificate;
+  try {
+    x509 = new X509Certificate(der);
+  } catch {
+    return null;
   }
 
+  const reportedType = x509.publicKey.asymmetricKeyType ?? "unknown";
+  const keyType: KeyType = RECOGNIZED_KEY_TYPES.has(reportedType) ? (reportedType as KeyType) : "unknown";
+  const details = x509.publicKey.asymmetricKeyDetails ?? {};
+  const modulusLength = typeof details.modulusLength === "number" ? details.modulusLength : null;
+  const keyBits = modulusLength ?? fixedKeyBits(keyType);
+  const curve = curveFriendlyName(details.namedCurve ?? null);
+
+  const signatureOid = certificateSignatureOid(x509.raw);
+
   return {
-    subject: commonName(raw.subject),
-    issuer: commonName(raw.issuer),
+    subject: commonName(x509.subject),
+    issuer: commonName(x509.issuer),
     isLeaf,
     keyType,
     keyBits,
     curve,
-    signatureAlgorithm: signatureAlgorithmFromDer(raw.raw),
-    validFrom: toIso(raw.valid_from),
-    validTo: toIso(raw.valid_to),
+    signatureAlgorithm: signatureAlgorithmName(signatureOid) ?? "unknown",
+    signatureOid,
+    validFrom: toIso(x509.validFrom),
+    validTo: toIso(x509.validTo),
   };
 }
 
+/** A human-facing description of a certificate's public key, e.g. "RSA-2048", "ECDSA P-256". */
 function keyDescription(cert: CertInfo): string {
-  if (cert.keyType === "rsa") return `RSA-${cert.keyBits ?? "?"}`;
   if (cert.keyType === "ec") return `ECDSA ${cert.curve ?? "(unknown curve)"}`;
-  if (cert.keyType === "ed25519") return "Ed25519";
-  if (cert.keyType === "ed448") return "Ed448";
-  return "unknown key type";
+  return keyAlgorithmLabel(cert.keyType, cert.keyBits, cert.curve);
 }
 
-function keyPqStatus(keyType: KeyType): { pq: PqStatus; severity: Severity } {
-  // RSA, ECDSA and EdDSA are all broken by Shor's algorithm.
-  if (keyType === "unknown") return { pq: "unknown", severity: "info" };
-  return { pq: "vulnerable", severity: "high" };
+/** Classify a certificate signature algorithm's post-quantum posture. */
+function signaturePosture(name: string): {
+  severity: Severity;
+  pq_status: PqStatus;
+  confidence: Confidence;
+  references: Reference[];
+  recommendation: string;
+} {
+  if (name === "unknown") {
+    return {
+      severity: "info",
+      pq_status: "unknown",
+      confidence: "low",
+      references: [],
+      recommendation: "Signature algorithm OID was not recognized — verify the certificate manually.",
+    };
+  }
+  if (/^ML-DSA|^SLH-DSA/i.test(name)) {
+    return {
+      severity: "info",
+      pq_status: "safe",
+      confidence: "confirmed",
+      references: [REFS.fips204, REFS.fips205],
+      recommendation: "Post-quantum signature already in use — keep it and track CA/ecosystem interop.",
+    };
+  }
+  if (/sha1/i.test(name)) {
+    return {
+      severity: "high",
+      pq_status: "vulnerable",
+      confidence: "confirmed",
+      references: [REFS.sp800131a, REFS.cwe327, REFS.fips204],
+      recommendation:
+        "SHA-1 signature: broken classically today (SP 800-131A disallows it) and quantum-vulnerable. Re-issue on SHA-256+ now, and plan ML-DSA / hybrid certificates.",
+    };
+  }
+  return {
+    severity: "high",
+    pq_status: "vulnerable",
+    confidence: "confirmed",
+    references: [REFS.fips204, REFS.cnsa2],
+    recommendation: "Classical signature; move to ML-DSA / hybrid certificates when CA support arrives.",
+  };
 }
 
 function evaluateProtocol(protocol: string | null, evidence: string): Finding | null {
@@ -137,11 +186,14 @@ function evaluateProtocol(protocol: string | null, evidence: string): Finding | 
   if (protocol === "TLSv1.3" || protocol === "TLSv1.2") {
     return {
       id: "CSW-TLS-004",
+      ruleId: "tls/negotiated-protocol",
       severity: protocol === "TLSv1.3" ? "info" : "medium",
       category: "tls",
       title: `Negotiated ${protocol}`,
       evidence,
       pq_status: "transitional",
+      confidence: "confirmed",
+      references: [REFS.hybridKex],
       recommendation:
         protocol === "TLSv1.3"
           ? "TLS 1.3 is required for hybrid post-quantum key exchange — keep it enabled."
@@ -150,11 +202,14 @@ function evaluateProtocol(protocol: string | null, evidence: string): Finding | 
   }
   return {
     id: "CSW-TLS-004",
+    ruleId: "tls/negotiated-protocol",
     severity: "high",
     category: "tls",
     title: `Obsolete protocol negotiated (${protocol})`,
     evidence,
     pq_status: "vulnerable",
+    confidence: "confirmed",
+    references: [REFS.hybridKex],
     recommendation: "Disable TLS < 1.2 and adopt TLS 1.3 to support post-quantum key exchange.",
   };
 }
@@ -166,11 +221,13 @@ function evaluateValidity(cert: CertInfo, evidence: string, now: Date): Finding 
   if (msLeft < 0) {
     return {
       id: "CSW-TLS-007",
+      ruleId: "tls/leaf-expired",
       severity: "high",
       category: "tls",
       title: "Leaf certificate has expired",
       evidence: `${evidence} valid_to=${cert.validTo}`,
       pq_status: "unknown",
+      confidence: "confirmed",
       recommendation: "Renew the certificate; an expired chain blocks any crypto-agility rollout.",
     };
   }
@@ -178,11 +235,13 @@ function evaluateValidity(cert: CertInfo, evidence: string, now: Date): Finding 
   if (msLeft < thirtyDays) {
     return {
       id: "CSW-TLS-007",
+      ruleId: "tls/leaf-expiring",
       severity: "low",
       category: "tls",
       title: "Leaf certificate expires within 30 days",
       evidence: `${evidence} valid_to=${cert.validTo}`,
       pq_status: "unknown",
+      confidence: "confirmed",
       recommendation: "Schedule renewal; pair it with a move to crypto-agile certificate tooling.",
     };
   }
@@ -190,27 +249,76 @@ function evaluateValidity(cert: CertInfo, evidence: string, now: Date): Finding 
 }
 
 function evaluateHybridKex(result: TlsScanResult, evidence: string): Finding {
+  const base = { id: "CSW-TLS-005", ruleId: "tls/hybrid-kex", category: "tls" as const };
+
+  // Preferred signal: the active capability probe.
+  if (result.hybridKex === "supported") {
+    return {
+      ...base,
+      severity: "info",
+      title: `Server supports hybrid post-quantum key exchange (${HYBRID_GROUP})`,
+      evidence: `${evidence} group=${HYBRID_GROUP}`,
+      pq_status: "transitional",
+      confidence: "confirmed",
+      algorithm: HYBRID_GROUP,
+      references: [REFS.hybridKex, REFS.fips203],
+      recommendation:
+        "Hybrid KEX available — keep it enabled and track migration to standalone ML-KEM once mandated.",
+    };
+  }
+  if (result.hybridKex === "unsupported") {
+    return {
+      ...base,
+      severity: "medium",
+      title: "Server does not support hybrid post-quantum key exchange",
+      evidence: `${evidence} group=${HYBRID_GROUP}`,
+      pq_status: "vulnerable",
+      confidence: "confirmed",
+      references: [REFS.hybridKex, REFS.fips203],
+      recommendation:
+        "Enable X25519MLKEM768 so session keys resist harvest-now-decrypt-later attacks.",
+    };
+  }
+
+  // Fallback: a negotiated group name, when one was observable (TLS 1.2 / injected).
   const negotiated = `${result.groupName ?? ""} ${result.cipherName ?? ""}`.trim();
   if (HYBRID_KEX.test(negotiated)) {
     return {
-      id: "CSW-TLS-005",
+      ...base,
       severity: "info",
-      category: "tls",
       title: `Hybrid post-quantum key exchange negotiated (${result.groupName ?? "hybrid"})`,
       evidence: `${evidence} ${negotiated}`,
       pq_status: "transitional",
+      confidence: "high",
+      algorithm: result.groupName ?? "hybrid-kex",
+      references: [REFS.hybridKex, REFS.fips203],
       recommendation: "Hybrid KEX in place — track migration to standalone ML-KEM once mandated.",
     };
   }
+  if (result.groupName) {
+    return {
+      ...base,
+      severity: "medium",
+      title: "No hybrid post-quantum key exchange negotiated",
+      evidence: `${evidence} group=${result.groupName}`,
+      pq_status: "vulnerable",
+      confidence: "high",
+      algorithm: result.groupName,
+      references: [REFS.hybridKex, REFS.fips203],
+      recommendation:
+        "Enable X25519MLKEM768 so session keys resist harvest-now-decrypt-later attacks.",
+    };
+  }
   return {
-    id: "CSW-TLS-005",
-    severity: "medium",
-    category: "tls",
-    title: "No hybrid post-quantum key exchange negotiated",
-    evidence: result.groupName ? `${evidence} group=${result.groupName}` : evidence,
-    pq_status: "vulnerable",
+    ...base,
+    severity: "info",
+    title: "Hybrid post-quantum key-exchange support could not be determined",
+    evidence,
+    pq_status: "unknown",
+    confidence: "low",
+    references: [REFS.hybridKex],
     recommendation:
-      "Enable X25519MLKEM768 so session keys resist harvest-now-decrypt-later attacks.",
+      "Could not determine hybrid support; confirm whether X25519MLKEM768 is enabled server-side.",
   };
 }
 
@@ -222,40 +330,48 @@ export function analyzeTls(result: TlsScanResult, target = "tls", now: Date = ne
   if (!leaf) {
     findings.push({
       id: "CSW-TLS-000",
+      ruleId: "tls/no-leaf",
       severity: "info",
       category: "tls",
       title: "No leaf certificate could be read",
       evidence: target,
       pq_status: "unknown",
+      confidence: "confirmed",
       recommendation: "Verify the host serves a certificate on the scanned port.",
     });
   } else {
     const subjectEvidence = `${target} (${leaf.subject})`;
-    const { pq, severity } = keyPqStatus(leaf.keyType);
+    const posture = keyPosture(leaf.keyType);
     findings.push({
       id: "CSW-TLS-001",
-      severity,
+      ruleId: "tls/leaf-public-key",
+      severity: posture.severity,
       category: "tls",
       title: `Leaf public key: ${keyDescription(leaf)}`,
       evidence: subjectEvidence,
-      pq_status: pq,
+      pq_status: posture.pq_status,
+      confidence: leaf.keyType === "unknown" ? "low" : "confirmed",
+      algorithm: keyAlgorithmLabel(leaf.keyType, leaf.keyBits, leaf.curve),
+      references: posture.references,
       recommendation:
-        pq === "vulnerable"
+        posture.pq_status === "vulnerable"
           ? "Plan migration to a post-quantum / hybrid certificate (ML-DSA) as CA support arrives."
           : "Confirm the key type and document it in the crypto inventory.",
     });
 
-    const sigVulnerable = leaf.signatureAlgorithm !== "unknown";
+    const sig = signaturePosture(leaf.signatureAlgorithm);
     findings.push({
       id: "CSW-TLS-002",
-      severity: leaf.signatureAlgorithm.includes("SHA1") ? "high" : sigVulnerable ? "high" : "info",
+      ruleId: "tls/leaf-signature",
+      severity: sig.severity,
       category: "tls",
       title: `Leaf signature algorithm: ${leaf.signatureAlgorithm}`,
       evidence: subjectEvidence,
-      pq_status: sigVulnerable ? "vulnerable" : "unknown",
-      recommendation: sigVulnerable
-        ? "Classical signature; move to ML-DSA / hybrid certificates when available."
-        : "Signature algorithm could not be identified from the DER — verify manually.",
+      pq_status: sig.pq_status,
+      confidence: sig.confidence,
+      algorithm: leaf.signatureAlgorithm,
+      references: sig.references,
+      recommendation: sig.recommendation,
     });
 
     const validity = evaluateValidity(leaf, target, now);
@@ -265,6 +381,7 @@ export function analyzeTls(result: TlsScanResult, target = "tls", now: Date = ne
   if (result.chain.length > 1) {
     findings.push({
       id: "CSW-TLS-003",
+      ruleId: "tls/chain-classical",
       severity: "medium",
       category: "tls",
       title: `Certificate chain has ${result.chain.length - 1} intermediate(s) using classical crypto`,
@@ -273,6 +390,8 @@ export function analyzeTls(result: TlsScanResult, target = "tls", now: Date = ne
         .map((c) => c.issuer)
         .join(" → "),
       pq_status: "vulnerable",
+      confidence: "high",
+      references: [REFS.fips204, REFS.cnsa2],
       recommendation:
         "The whole chain must migrate; classical intermediates remain quantum-vulnerable.",
     });
@@ -292,24 +411,10 @@ function collectChain(leaf: DetailedPeerCertificate): CertInfo[] {
   let isLeaf = true;
   while (cert && cert.fingerprint256 && !seen.has(cert.fingerprint256)) {
     seen.add(cert.fingerprint256);
-    chain.push(
-      normalizeCert(
-        {
-          subject: cert.subject as unknown as Record<string, string>,
-          issuer: cert.issuer as unknown as Record<string, string>,
-          valid_from: cert.valid_from,
-          valid_to: cert.valid_to,
-          modulus: cert.modulus,
-          exponent: cert.exponent,
-          bits: cert.bits,
-          nistCurve: cert.nistCurve,
-          asn1Curve: cert.asn1Curve,
-          pubkey: cert.pubkey,
-          raw: cert.raw,
-        },
-        isLeaf,
-      ),
-    );
+    if (cert.raw) {
+      const parsed = parseCertificate(cert.raw, isLeaf);
+      if (parsed) chain.push(parsed);
+    }
     isLeaf = false;
     const next: DetailedPeerCertificate | undefined = cert.issuerCertificate;
     if (!next || next.fingerprint256 === cert.fingerprint256) break;
@@ -318,8 +423,9 @@ function collectChain(leaf: DetailedPeerCertificate): CertInfo[] {
   return chain;
 }
 
-const defaultProbe: TlsProbe = (host, port, timeoutMs) =>
-  new Promise<TlsScanResult>((resolve, reject) => {
+/** Perform the primary handshake and read the certificate chain and parameters. */
+function handshake(host: string, port: number, timeoutMs: number): Promise<Omit<TlsScanResult, "hybridKex">> {
+  return new Promise((resolve, reject) => {
     const socket = tlsConnect(
       {
         host,
@@ -337,7 +443,7 @@ const defaultProbe: TlsProbe = (host, port, timeoutMs) =>
             ephemeral && typeof ephemeral === "object" && "name" in ephemeral
               ? ((ephemeral as { name?: string }).name ?? null)
               : null;
-          const result: TlsScanResult = {
+          const result: Omit<TlsScanResult, "hybridKex"> = {
             protocol: socket.getProtocol(),
             cipherName: cipher?.name ?? null,
             groupName,
@@ -356,6 +462,64 @@ const defaultProbe: TlsProbe = (host, port, timeoutMs) =>
       socket.destroy(new Error(`TLS handshake to ${host}:${port} timed out after ${timeoutMs}ms`));
     });
   });
+}
+
+/**
+ * Actively probe whether the server will negotiate the standardized hybrid
+ * post-quantum group. We attempt a handshake restricted to X25519MLKEM768: a
+ * clean completion proves support; a TLS-level rejection proves the server
+ * refused it; a network error (or an OpenSSL that doesn't know the group) is
+ * inconclusive. We never conclude "unsupported" from an ambiguous failure.
+ */
+function probeHybridSupport(host: string, port: number, timeoutMs: number): Promise<HybridSupport> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (value: HybridSupport): void => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
+    let socket: ReturnType<typeof tlsConnect>;
+    try {
+      socket = tlsConnect(
+        { host, port, servername: host, rejectUnauthorized: false, ecdhCurve: HYBRID_GROUP },
+        () => {
+          done("supported");
+          socket.end();
+        },
+      );
+    } catch {
+      // Local OpenSSL does not know the group name — cannot probe.
+      done("unknown");
+      return;
+    }
+    socket.once("error", (err: NodeJS.ErrnoException) => {
+      const code = err.code ?? "";
+      const message = err.message ?? String(err);
+      if (/^(ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE)$/.test(code)) {
+        done("unknown"); // transport-level problem — inconclusive
+      } else if (/ERR_SSL|handshake|alert|curve|group|no protocols|version|unsupported/i.test(`${code} ${message}`)) {
+        done("unsupported"); // server actively refused the hybrid group
+      } else {
+        done("unknown");
+      }
+      socket.destroy();
+    });
+    socket.setTimeout(timeoutMs, () => {
+      done("unknown");
+      socket.destroy();
+    });
+  });
+}
+
+const defaultProbe: TlsProbe = async (host, port, timeoutMs) => {
+  const [base, hybridKex] = await Promise.all([
+    handshake(host, port, timeoutMs),
+    probeHybridSupport(host, port, Math.min(timeoutMs, 8000)),
+  ]);
+  return { ...base, hybridKex };
+};
 
 /** Scan a host's TLS posture and return findings. */
 export async function scanTls(host: string, options: TlsScanOptions = {}): Promise<Finding[]> {
