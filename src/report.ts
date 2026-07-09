@@ -138,6 +138,15 @@ export function toJson(report: Report): string {
   return JSON.stringify(report, null, 2);
 }
 
+/** Severities in ascending order of importance, for threshold comparisons. */
+const SEVERITY_RANK: readonly Severity[] = ["info", "low", "medium", "high", "critical"];
+
+/** True if any finding is at or above `threshold` — the CI fail-gate predicate. */
+export function failsThreshold(report: Report, threshold: Severity): boolean {
+  const cut = SEVERITY_RANK.indexOf(threshold);
+  return report.findings.some((f) => SEVERITY_RANK.indexOf(f.severity) >= cut);
+}
+
 const SEVERITY_BADGE: Record<Severity, string> = {
   critical: "🟥 critical",
   high: "🟧 high",
