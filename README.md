@@ -12,9 +12,11 @@ Scans your public surface, your repos, and your dependencies to produce a board-
 
 > *"Are we ready for the post-quantum migration?"*
 
-It inventories the cryptographic primitives a system actually uses (TLS certificates, source-code crypto patterns, dependency manifests) and flags the ones a cryptographically-relevant quantum computer would break — RSA, ECDSA, classical key exchange — so engineering teams can plan a migration to hybrid / ML-KEM / ML-DSA before they have to.
+It inventories the cryptographic primitives a system actually uses (TLS certificates, source-code crypto patterns, dependency manifests) and flags the ones a cryptographically-relevant quantum computer would break — RSA, ECDSA, EdDSA, classical key exchange — so engineering teams can plan a migration to hybrid / ML-KEM / ML-DSA before they have to.
 
-Runs as a Node CLI. Outputs JSON and Markdown reports. Optional email delivery via Resend. Optional hosted landing page (Cloudflare Worker) for capturing scan requests.
+Detection is designed to be defensible, not heuristic where it counts: certificate keys are typed from a parsed `KeyObject`, signature algorithms from the certificate's actual ASN.1 field, and hybrid post-quantum key exchange (X25519MLKEM768) is confirmed by an active capability probe. Every finding carries a confidence level and a NIST/standards citation.
+
+Runs as a Node CLI. Outputs JSON, Markdown, a **CycloneDX 1.6 CBOM**, **SARIF 2.1.0** (for CI / code scanning), and a **self-contained interactive HTML report**. A `--fail-on <severity>` gate makes it a CI check. Optional email delivery via Resend, and an optional hosted landing page (Cloudflare Worker) for capturing scan requests.
 
 ---
 
@@ -53,7 +55,7 @@ If your customer's data still matters in 2040, you are the user.
 
 | Surface | Scanner | Examples |
 |---|---|---|
-| **Public TLS** | `tls` | Cert chain, leaf key type/size, signature algorithm, advertised cipher suites, hybrid-KEX (`X25519MLKEM768`) negotiation hint |
+| **Public TLS** | `tls` | Cert chain, leaf key type/size (from a parsed `KeyObject`), signature algorithm (from the ASN.1 field), and active hybrid-KEX (`X25519MLKEM768`) support probing |
 | **Source code** | `source` | Weak `node:crypto` usage (MD5 / SHA-1 / DES / 3DES / RC4), `jsonwebtoken` algorithms, hardcoded RSA/EC private keys, embedded PEM public keys |
 | **Dependencies** | `deps` | `package.json` / `pnpm-lock.yaml`, `requirements.txt` / `pyproject.toml`, `Cargo.toml` — flagged against an internal registry of PQ-vulnerable libs with NIST-aligned alternatives |
 
@@ -77,11 +79,29 @@ node dist/cli.js scan https://www.example.com
 # Full scan of a GitHub repo (TLS + source + deps)
 node dist/cli.js scan facebook/react
 
-# Local directory
-node dist/cli.js scan ./my-project --out report.json --md report.md
+# Local directory, every output format at once
+node dist/cli.js scan ./my-project \
+  --out report.json --md report.md \
+  --cbom cbom.json --sarif results.sarif --html report.html
+
+# CI gate: exit non-zero if anything is high or worse
+node dist/cli.js scan ./my-project --sarif results.sarif --fail-on high
 ```
 
-Output goes to stdout as Markdown by default, or to `--out` (JSON) / `--md` (Markdown) files.
+Output goes to stdout as Markdown by default, or to any combination of the output flags below.
+
+## Outputs & interoperability
+
+| Flag | Format | Use |
+|---|---|---|
+| `--out` | JSON | The full report, machine-readable |
+| `--md` | Markdown | Human-readable summary + recommendations |
+| `--cbom` | **CycloneDX 1.6 CBOM** | Cryptography Bill of Materials — flows into SBOM / compliance tooling; each asset carries its NIST post-quantum security level |
+| `--sarif` | **SARIF 2.1.0** | GitHub code scanning and any SARIF-aware CI, with `security-severity` per rule |
+| `--html` | Self-contained HTML | Offline interactive report: filter by severity / PQ status, search, drill into evidence and citations |
+| `--fail-on <sev>` | exit code | Exit `2` if any finding is at/above `critical\|high\|medium\|low\|info` |
+
+Every finding also carries a `confidence` level (`confirmed` = parsed structure; `low` = a context-sensitive heuristic) so downstream consumers can triage.
 
 ---
 
@@ -126,36 +146,27 @@ Standard.
 
 ## Sample output
 
-Real scan of `www.filevine.com`:
+Real scan of `www.filevine.com` (default Markdown output):
 
 ```text
-Scanned https://www.filevine.com: 5 finding(s) (critical 0, high 2, medium 2, low 0).
+# cryptosweep report
 
-[high   ] Leaf public key: ECDSA P-256
-            pq_status: vulnerable
-            evidence:  www.filevine.com:443 (www.filevine.com)
-            remediation: Plan migration to a post-quantum / hybrid certificate (ML-DSA) as CA support arrives.
+- Target:     https://www.filevine.com
+- Findings:   5 (critical: 0, high: 2, medium: 1, low: 0, info: 2)
 
-[high   ] Leaf signature algorithm: ecdsa-with-SHA256
-            pq_status: vulnerable
-            evidence:  www.filevine.com:443 (www.filevine.com)
-            remediation: Classical signature; move to ML-DSA / hybrid certificates when available.
-
-[medium ] Certificate chain has 3 intermediate(s) using classical crypto
-            pq_status: vulnerable
-            evidence:  GTS Root R4 → GlobalSign Root CA → GlobalSign Root CA
-            remediation: The whole chain must migrate; classical intermediates remain quantum-vulnerable.
-
-[medium ] No hybrid post-quantum key exchange negotiated
-            pq_status: vulnerable
-            evidence:  www.filevine.com:443
-            remediation: Enable X25519MLKEM768 so session keys resist harvest-now-decrypt-later attacks.
-
-[info   ] Negotiated TLSv1.3
-            pq_status: transitional
-            evidence:  www.filevine.com:443
-            remediation: TLS 1.3 is required for hybrid post-quantum key exchange — keep it enabled.
+| Severity  | PQ status    | Confidence | Finding                                                          |
+| --------- | ------------ | ---------- | ---------------------------------------------------------------- |
+| 🟧 high   | vulnerable   | confirmed  | Leaf public key: ECDSA P-256                                     |
+| 🟧 high   | vulnerable   | confirmed  | Leaf signature algorithm: ecdsaWithSHA256                       |
+| 🟨 medium | vulnerable   | high       | Certificate chain has 3 intermediate(s) using classical crypto   |
+| ⬜ info   | transitional | confirmed  | Negotiated TLSv1.3                                               |
+| ⬜ info   | transitional | confirmed  | Server supports hybrid post-quantum key exchange (X25519MLKEM768)|
 ```
+
+Note the last row: cryptosweep actively confirmed the server *will* negotiate
+X25519MLKEM768 — the session key exchange already resists harvest-now-decrypt-later,
+even though the certificate itself is still classical. That distinction is the
+whole point of a per-primitive inventory.
 
 JSON output schema:
 
@@ -186,17 +197,23 @@ JSON output schema:
 cryptosweep/
 ├── src/
 │   ├── cli.ts                       # Node CLI entry (cac)
-│   ├── report.ts                    # Report + Finding types, JSON + Markdown rendering
+│   ├── report.ts                    # Finding ontology (confidence, refs, location) + JSON/Markdown
+│   ├── crypto.ts                    # Cryptographic-primitive knowledge base + standards citations
+│   ├── asn1.ts                      # Minimal total DER reader (certificate signature OID)
 │   ├── scanners/
-│   │   ├── tls.ts                   # TLS posture scanner
-│   │   ├── source.ts                # Source-code crypto scanner (regex first-pass)
+│   │   ├── tls.ts                   # TLS scanner: KeyObject typing, ASN.1 sig, active hybrid probe
+│   │   ├── source.ts                # Source-code crypto scanner (context-calibrated regex)
 │   │   └── deps/
 │   │       ├── registry.ts          # PQ-vulnerable library registry (pure data)
 │   │       └── parsers/{npm,python,cargo}.ts
+│   ├── output/
+│   │   ├── cbom.ts                  # CycloneDX 1.6 Cryptography Bill of Materials
+│   │   ├── sarif.ts                 # SARIF 2.1.0 (CI / code scanning)
+│   │   └── viewer.ts                # Self-contained interactive HTML report
 │   └── email/
 │       ├── render.ts                # HTML + plain-text email rendering
 │       └── resend.ts                # Thin fetch wrapper around the Resend API
-├── tests/                           # vitest unit tests for every scanner + email
+├── tests/                           # vitest unit tests incl. real cert fixtures
 └── web/                             # Cloudflare Worker landing page + scan-request capture
     ├── src/
     │   ├── landing.html             # Marketing page + email-capture form
@@ -244,7 +261,9 @@ Full deploy runbook for the Worker (Cloudflare auth, D1, KV, secrets, deploy) li
 
 **v0.1 (shipped)** — CLI + TLS scanner + source scanner + deps scanner + email send + landing page + Discord webhook + manual fulfillment workflow.
 
-**v0.2 (planned)** — JWT live-discovery scanner (`jwt` category), KMS/HSM posture detection, automated D1-status sync after email is sent, dependency-version-range matching against the registry.
+**Correctness & interoperability (shipped)** — deterministic certificate typing via `KeyObject` + ASN.1 (EdDSA/DSA/RSA-PSS included), SHA-1 signatures called out distinctly, active hybrid-KEX capability probe, per-finding confidence + NIST citations, context-calibrated source scanning (no false criticals on docs/tests), and **CycloneDX 1.6 CBOM + SARIF 2.1.0 + interactive HTML outputs + a `--fail-on` CI gate**.
+
+**v0.2 (planned)** — version-aware dependency matching against advisory data (consume the registry's `version_range`), KMS/HSM posture detection, AST-based source analysis to replace the regex first-pass.
 
 **v0.3** — Auto-generated migration PRs (hybrid wrap + dep upgrades), continuous monitoring (scan on every PR open), Slack alerts in addition to Discord.
 
@@ -254,7 +273,7 @@ Full deploy runbook for the Worker (Cloudflare auth, D1, KV, secrets, deploy) li
 
 ## Status, scope, and trust
 
-`cryptosweep` is pre-1.0 software. The TLS scanner is built on Node's standard `tls` module and is well-tested. The source scanner is a fast regex first-pass; it will miss some constructs and is not a substitute for a hand audit. The dependency registry is hand-curated; PRs adding libraries (with citations) are welcome.
+`cryptosweep` is pre-1.0 software, and it tells you how sure it is. The TLS scanner parses certificates with Node's `crypto`/`tls` modules and a minimal ASN.1 reader, so key type, signature algorithm, and hybrid-KEX support are `confirmed`-confidence, not guessed. The source scanner is a regex first-pass (`medium`/`low` confidence, and de-rated in docs/tests to avoid false criticals); it will miss some constructs and is not a substitute for a hand audit — an AST engine is on the roadmap. The dependency registry is hand-curated and currently version-blind (version-range matching is on the roadmap); PRs adding libraries with citations are welcome.
 
 **This is not a cryptography implementation.** No new primitives. No new protocols. cryptosweep does not encrypt anything — it audits what other code does.
 
