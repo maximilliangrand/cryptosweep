@@ -11,8 +11,10 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { cac } from "cac";
-import { buildReport, toJson, toMarkdown } from "./report";
-import type { Finding, Report } from "./report";
+import { buildReport, failsThreshold, toJson, toMarkdown } from "./report";
+import type { Finding, Report, Severity } from "./report";
+import { toCbom } from "./output/cbom";
+import { toSarif } from "./output/sarif";
 import { scanTls } from "./scanners/tls";
 import { cloneRepo, scanSource } from "./scanners/source";
 import { scanDeps } from "./scanners/deps";
@@ -23,9 +25,14 @@ import { VERSION } from "./version";
 interface ScanOptions {
   out?: string;
   md?: string;
+  cbom?: string;
+  sarif?: string;
+  failOn?: string;
   port?: string | number;
   timeout?: string | number;
 }
+
+const SEVERITIES: ReadonlySet<string> = new Set(["critical", "high", "medium", "low", "info"]);
 
 type Target =
   | { kind: "github"; url: string }
@@ -79,15 +86,30 @@ async function runScan(target: string, options: ScanOptions): Promise<void> {
 
     if (options.out) await writeFile(options.out, `${toJson(report)}\n`, "utf8");
     if (options.md) await writeFile(options.md, `${toMarkdown(report)}\n`, "utf8");
+    if (options.cbom) await writeFile(options.cbom, `${toCbom(report)}\n`, "utf8");
+    if (options.sarif) await writeFile(options.sarif, `${toSarif(report)}\n`, "utf8");
 
-    if (!options.out && !options.md) {
+    const wroteFile = Boolean(options.out || options.md || options.cbom || options.sarif);
+    if (!wroteFile) {
       stdout(`${toMarkdown(report)}\n`);
     } else {
       const { summary } = report;
       stdout(
         `Scanned ${target}: ${summary.findings} finding(s) ` +
-          `(critical ${summary.critical}, high ${summary.high}, medium ${summary.medium}, low ${summary.low}).\n`,
+          `(critical ${summary.critical}, high ${summary.high}, medium ${summary.medium}, ` +
+          `low ${summary.low}, info ${summary.info}).\n`,
       );
+    }
+
+    if (options.failOn) {
+      const threshold = options.failOn.toLowerCase();
+      if (!SEVERITIES.has(threshold)) {
+        throw new Error(`--fail-on must be one of critical|high|medium|low|info (got "${options.failOn}")`);
+      }
+      if (failsThreshold(report, threshold as Severity)) {
+        stderr(`cryptosweep: findings at or above "${threshold}" — failing (exit 2).\n`);
+        process.exitCode = 2;
+      }
     }
   } catch (err) {
     stderr(`cryptosweep: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -162,10 +184,13 @@ cli
   .command("scan <target>", "Scan a host/URL (TLS posture) or a GitHub repo / local dir (source crypto)")
   .option("--out <file>", "Write the JSON report to <file>")
   .option("--md <file>", "Write the Markdown report to <file>")
+  .option("--cbom <file>", "Write a CycloneDX 1.6 CBOM to <file>")
+  .option("--sarif <file>", "Write a SARIF 2.1.0 log to <file> (for CI / code scanning)")
+  .option("--fail-on <severity>", "Exit non-zero if any finding is at/above this severity")
   .option("--port <port>", "TLS port (defaults to 443 or the port in the target)")
   .option("--timeout <ms>", "TLS handshake timeout in milliseconds (default 10000)")
-  .example("  cryptosweep scan https://www.example.com --out report.json")
-  .example("  cryptosweep scan facebook/react")
+  .example("  cryptosweep scan https://www.example.com --out report.json --cbom cbom.json")
+  .example("  cryptosweep scan facebook/react --sarif results.sarif --fail-on high")
   .action(runScan);
 
 cli

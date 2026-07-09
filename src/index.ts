@@ -11,7 +11,9 @@ export type {
   ReportSummary,
   Severity,
 } from "./report";
-export { buildReport, normalizeFinding, toJson, toMarkdown } from "./report";
+export { buildReport, failsThreshold, normalizeFinding, toJson, toMarkdown } from "./report";
+export { toCbom, describeAlgorithm } from "./output/cbom";
+export { toSarif } from "./output/sarif";
 export type { KeyType } from "./crypto";
 export {
   REFS,
