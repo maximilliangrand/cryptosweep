@@ -9,17 +9,17 @@ export type PqStatus = "vulnerable" | "transitional" | "safe" | "unknown";
 /**
  * How sure the scanner is that a finding is real and correctly classified.
  *
- * - `confirmed` — derived from parsed, structured evidence (an ASN.1 field, a
+ * - `confirmed`, derived from parsed, structured evidence (an ASN.1 field, a
  *   `KeyObject`, a resolved dependency version). No guessing.
- * - `high` — a strong structural signal with a small, well-understood residual
+ * - `high`, a strong structural signal with a small, well-understood residual
  *   ambiguity.
- * - `medium` — a heuristic (regex) match on code with real false-positive risk.
- * - `low` — a match in a context (docs, tests, examples) where it may not be a
+ * - `medium`, a heuristic (regex) match on code with real false-positive risk.
+ * - `low`, a match in a context (docs, tests, examples) where it may not be a
  *   live code path at all.
  */
 export type Confidence = "confirmed" | "high" | "medium" | "low";
 
-/** A citation backing a finding — a standard, advisory, or spec. */
+/** A citation backing a finding, a standard, advisory, or spec. */
 export interface Reference {
   label: string;
   url?: string;
@@ -141,7 +141,7 @@ export function toJson(report: Report): string {
 /** Severities in ascending order of importance, for threshold comparisons. */
 const SEVERITY_RANK: readonly Severity[] = ["info", "low", "medium", "high", "critical"];
 
-/** True if any finding is at or above `threshold` — the CI fail-gate predicate. */
+/** True if any finding is at or above `threshold`, the CI fail-gate predicate. */
 export function failsThreshold(report: Report, threshold: Severity): boolean {
   const cut = SEVERITY_RANK.indexOf(threshold);
   return report.findings.some((f) => SEVERITY_RANK.indexOf(f.severity) >= cut);
@@ -185,7 +185,7 @@ export function toMarkdown(report: Report): string {
 
   lines.push(``, `## Recommendations`, ``);
   for (const finding of report.findings) {
-    lines.push(`- **${finding.id}** — ${finding.recommendation}`);
+    lines.push(`- **${finding.id}**, ${finding.recommendation}`);
   }
 
   return lines.join("\n");

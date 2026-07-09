@@ -22,7 +22,7 @@ const SEVERITY_TO_LEVEL: Record<Severity, Level> = {
   info: "none",
 };
 
-/** GitHub code scanning reads `security-severity` as a CVSS-like 0.0–10.0 score. */
+/** GitHub code scanning reads `security-severity` as a CVSS-like 0.0-10.0 score. */
 const SEVERITY_TO_SCORE: Record<Severity, string> = {
   critical: "9.5",
   high: "8.0",
@@ -77,7 +77,7 @@ function resultFor(finding: Finding): SarifResult {
     ruleId,
     level: SEVERITY_TO_LEVEL[finding.severity],
     message: {
-      text: references ? `${finding.title} — ${finding.recommendation} [${references}]` : `${finding.title} — ${finding.recommendation}`,
+      text: references ? `${finding.title}, ${finding.recommendation} [${references}]` : `${finding.title}, ${finding.recommendation}`,
     },
     properties: {
       severity: finding.severity,

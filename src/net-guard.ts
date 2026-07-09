@@ -2,8 +2,8 @@
  * SSRF guard for scan targets.
  *
  * cryptosweep connects to user-supplied hosts. When it runs as (or behind) a
- * service, an attacker could point it at internal infrastructure — cloud
- * metadata endpoints, loopback admin panels, RFC 1918 hosts — to exfiltrate
+ * service, an attacker could point it at internal infrastructure, cloud
+ * metadata endpoints, loopback admin panels, RFC 1918 hosts, to exfiltrate
  * data or map the network. This module resolves a target and refuses addresses
  * that are not publicly routable, unless the caller explicitly opts in (which
  * is reasonable for local development against `localhost`).
@@ -40,7 +40,7 @@ function isBlockedIpv4(ip: string): boolean {
 function isBlockedIpv6(ip: string): boolean {
   const addr = ip.toLowerCase().split("%")[0] ?? ip; // strip zone id
   if (addr === "::1" || addr === "::") return true; // loopback / unspecified
-  // IPv4-mapped (::ffff:a.b.c.d) — evaluate the embedded IPv4.
+  // IPv4-mapped (::ffff:a.b.c.d), evaluate the embedded IPv4.
   const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(addr);
   if (mapped?.[1]) return isBlockedIpv4(mapped[1]);
   if (/^fe[89ab]/.test(addr)) return true; // link-local fe80::/10

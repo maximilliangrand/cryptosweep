@@ -57,7 +57,7 @@ const JWT_USAGE = /jsonwebtoken|\bjwt\s*\.\s*(?:sign|verify|decode)/i;
 /**
  * A private-key block is only flagged when it has a real base64 body between the
  * BEGIN/END markers. A bare header or a `...`-elided snippet (as in READMEs and
- * docs) does not match — that alone kills the most common false critical.
+ * docs) does not match, that alone kills the most common false critical.
  */
 const PRIVATE_KEY =
   /-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY-----[\r\n]+[A-Za-z0-9+/=\r\n]{40,}-----END/g;
@@ -67,7 +67,7 @@ const PUBLIC_KEY = /-----BEGIN (?:RSA )?PUBLIC KEY-----/g;
  * Where a match was found. A weak primitive in a real source file is a live code
  * path; the same string in documentation or a test fixture is usually an
  * example, so we lower its severity and mark the finding low-confidence rather
- * than crying wolf. Recall is preserved — nothing is dropped, only calibrated.
+ * than crying wolf. Recall is preserved, nothing is dropped, only calibrated.
  */
 type FileContext = "source" | "docs" | "test";
 
@@ -94,7 +94,7 @@ function lowerSeverity(base: Severity, steps: number): Severity {
 /**
  * Effective severity + confidence for a base severity given the file context.
  * `structural` marks findings (like a well-formed PEM key block) whose match is
- * unambiguous even though it came from a regex — those stay high-confidence.
+ * unambiguous even though it came from a regex, those stay high-confidence.
  */
 function calibrate(
   base: Severity,
@@ -127,7 +127,7 @@ function lineNumber(content: string, index: number): number {
 
 function jwtAssessment(alg: string): { severity: Severity; pq: PqStatus; note: string } {
   if (alg === "none") {
-    return { severity: "critical", pq: "vulnerable", note: 'JWT "alg: none" disables signature verification — remove it.' };
+    return { severity: "critical", pq: "vulnerable", note: 'JWT "alg: none" disables signature verification, remove it.' };
   }
   if (alg.startsWith("HS")) {
     return {
@@ -155,7 +155,7 @@ function* matchAll(
   }
 }
 
-/** Scan a single file's content. Pure — drives the source scanner tests. */
+/** Scan a single file's content. Pure, drives the source scanner tests. */
 export function scanContent(relPath: string, content: string, ids = new IdAllocator()): Finding[] {
   const findings: Finding[] = [];
   const context = classifyFile(relPath);
@@ -306,7 +306,7 @@ export async function scanSource(rootDir: string, options: SourceScanOptions = {
       ruleId: "source/scan-truncated",
       severity: "info",
       category: "source",
-      title: "Source scan stopped at a resource limit — coverage is incomplete",
+      title: "Source scan stopped at a resource limit, coverage is incomplete",
       evidence: `${rootDir} (file or byte cap reached)`,
       pq_status: "unknown",
       confidence: "confirmed",
