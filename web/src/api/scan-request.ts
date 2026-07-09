@@ -1,4 +1,4 @@
-import { checkRateLimit } from "../lib/rate-limit";
+import { checkRateLimitDurable } from "../lib/rate-limiter-do";
 import { hashIp } from "../lib/ip-hash";
 import {
   parseBody,
@@ -20,7 +20,7 @@ export async function handleScanRequest(req: Request, env: Env, ctx: ExecutionCo
   const ipHash = await hashIp(env.IP_HASH_SECRET, ip);
   const now = Date.now();
 
-  const limit = await checkRateLimit(env.RL_KV, ipHash, now);
+  const limit = await checkRateLimitDurable(env.RATE_LIMITER, ipHash);
   if (!limit.ok) {
     return jsonResponse(429, { error: "rate_limited", retry_after: limit.resetSeconds });
   }

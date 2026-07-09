@@ -11,6 +11,15 @@ database_id = "TBD-MAX-WILL-PROVIDE"
 binding = "RL_KV"
 id = "TBD-MAX-WILL-PROVIDE"
 
+# Atomic rate limiting. One Durable Object instance per client key.
+[[durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "RateLimiter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RateLimiter"]
+
 [[rules]]
 type = "Text"
 globs = ["**/*.html"]

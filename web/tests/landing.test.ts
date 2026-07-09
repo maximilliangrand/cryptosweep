@@ -13,4 +13,11 @@ describe("GET /", () => {
     expect(body).toContain('<input id="email" type="email"');
     expect(body).toContain("Post-quantum readiness for legal SaaS");
   });
+
+  it("serves the /privacy page the footer links to (no longer a dead link)", async () => {
+    const res = await SELF.fetch("https://example.com/privacy");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toMatch(/^text\/html/);
+    expect(await res.text()).toContain("Privacy");
+  });
 });

@@ -30,6 +30,7 @@ interface ScanOptions {
   sarif?: string;
   html?: string;
   failOn?: string;
+  allowPrivate?: boolean;
   port?: string | number;
   timeout?: string | number;
 }
@@ -79,6 +80,7 @@ async function runScan(target: string, options: ScanOptions): Promise<void> {
         ? await scanTls(parsed.host, {
             port: options.port ? Number(options.port) : parsed.port,
             timeoutMs,
+            allowPrivate: options.allowPrivate,
           })
         : parsed.kind === "path"
           ? await scanLocalDir(parsed.dir)
@@ -117,9 +119,21 @@ async function runScan(target: string, options: ScanOptions): Promise<void> {
       }
     }
   } catch (err) {
-    stderr(`cryptosweep: ${err instanceof Error ? err.message : String(err)}\n`);
+    stderr(`cryptosweep: ${describeError(err)}\n`);
     process.exitCode = 1;
   }
+}
+
+/** Render an error for the user, never leaving an empty message (e.g. a bare socket error). */
+function describeError(err: unknown): string {
+  if (err instanceof Error) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (err.message) return code ? `${err.message} (${code})` : err.message;
+    if (code) return `network error: ${code}`;
+    return err.name || "unknown error";
+  }
+  const text = String(err);
+  return text && text !== "[object Object]" ? text : "unknown error";
 }
 
 async function scanLocalDir(dir: string): Promise<Finding[]> {
@@ -193,6 +207,7 @@ cli
   .option("--sarif <file>", "Write a SARIF 2.1.0 log to <file> (for CI / code scanning)")
   .option("--html <file>", "Write a self-contained interactive HTML report to <file>")
   .option("--fail-on <severity>", "Exit non-zero if any finding is at/above this severity")
+  .option("--allow-private", "Allow scanning non-public addresses (localhost, RFC 1918)")
   .option("--port <port>", "TLS port (defaults to 443 or the port in the target)")
   .option("--timeout <ms>", "TLS handshake timeout in milliseconds (default 10000)")
   .example("  cryptosweep scan https://www.example.com --out report.json --cbom cbom.json")

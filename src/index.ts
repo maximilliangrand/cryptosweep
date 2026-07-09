@@ -24,6 +24,7 @@ export {
   keyPosture,
 } from "./crypto";
 export { certificateSignatureOid, signatureAlgorithmName } from "./asn1";
+export { assertTargetAllowed, isBlockedAddress } from "./net-guard";
 export type { CertInfo, TlsProbe, TlsScanOptions, TlsScanResult } from "./scanners/tls";
 export { analyzeTls, parseCertificate, scanTls } from "./scanners/tls";
 export type { ClonedRepo, SourceScanOptions } from "./scanners/source";
