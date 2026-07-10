@@ -1,0 +1,31 @@
+{
+  "schema": "urfael.plugin/v1",
+  "id": "cryptosweep",
+  "name": "cryptosweep",
+  "description": "Post-quantum cryptography scanner: inventory cryptography, flag quantum-vulnerable primitives, and compute harvest-now-decrypt-later (Mosca-clock) risk.",
+  "version": "0.1.0",
+  "author": "Grandillionaire",
+  "license": "MIT",
+  "runtime": "mcp-native",
+  "entry": {
+    "transport": "stdio",
+    "cmd": ["node", "/absolute/path/to/cryptosweep/dist/mcp.js"]
+  },
+  "capabilities": {
+    "brain": {
+      "tools": [
+        {
+          "name": "scan",
+          "description": "Scan a target (hostname/URL, GitHub owner/repo, or local path) for quantum-vulnerable cryptography; returns the inventory plus a harvest-now-decrypt-later (Mosca-clock) risk assessment."
+        },
+        {
+          "name": "data_classes",
+          "description": "List the confidentiality data classes and their secrecy horizons available for the risk model."
+        }
+      ]
+    }
+  },
+  "provenance": {
+    "sourceUrl": "https://github.com/Grandillionaire/cryptosweep"
+  }
+}
