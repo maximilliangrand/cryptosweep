@@ -15,6 +15,18 @@ export { buildReport, failsThreshold, normalizeFinding, toJson, toMarkdown } fro
 export { toCbom, describeAlgorithm } from "./output/cbom";
 export { toSarif } from "./output/sarif";
 export { toHtml } from "./output/viewer";
+export type { DataClass, EstateProfile, Obligation, QuantumAssumption } from "./model/estate";
+export { DATA_CLASSES, defaultProfile, isDataClassId } from "./model/estate";
+export type {
+  CryptoAsset,
+  CryptoGraph,
+  HarvestLedger,
+  MoscaStatus,
+  MoscaVerdict,
+  RiskModel,
+  ThreatModel,
+} from "./model/risk";
+export { assessRisk, classifyThreat } from "./model/risk";
 export type { KeyType } from "./crypto";
 export {
   REFS,

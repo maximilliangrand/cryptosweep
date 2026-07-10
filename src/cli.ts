@@ -16,6 +16,9 @@ import type { Finding, Report, Severity } from "./report";
 import { toCbom } from "./output/cbom";
 import { toSarif } from "./output/sarif";
 import { toHtml } from "./output/viewer";
+import { assessRisk } from "./model/risk";
+import type { RiskModel } from "./model/risk";
+import { DATA_CLASSES, defaultProfile, isDataClassId } from "./model/estate";
 import { scanTls } from "./scanners/tls";
 import { cloneRepo, scanSource } from "./scanners/source";
 import { scanDeps } from "./scanners/deps";
@@ -32,6 +35,9 @@ interface ScanOptions {
   failOn?: string;
   allowPrivate?: boolean;
   advisories?: boolean;
+  dataClass?: string;
+  crqcYear?: string | number;
+  risk?: string;
   port?: string | number;
   timeout?: string | number;
 }
@@ -95,14 +101,24 @@ async function runScan(target: string, options: ScanOptions): Promise<void> {
 
     const report = buildReport(target, findings);
 
+    if (options.dataClass && !isDataClassId(options.dataClass)) {
+      throw new Error(`--data-class must be one of ${DATA_CLASSES.map((c) => c.id).join(", ")}`);
+    }
+    const profile = defaultProfile(report.scanned_at, {
+      dataClassId: options.dataClass,
+      crqcYear: options.crqcYear ? Number(options.crqcYear) : undefined,
+    });
+    const risk = assessRisk(target, report.findings, profile);
+
     if (options.out) await writeFile(options.out, `${toJson(report)}\n`, "utf8");
     if (options.md) await writeFile(options.md, `${toMarkdown(report)}\n`, "utf8");
     if (options.cbom) await writeFile(options.cbom, `${toCbom(report)}\n`, "utf8");
     if (options.sarif) await writeFile(options.sarif, `${toSarif(report)}\n`, "utf8");
-    if (options.html) await writeFile(options.html, toHtml(report), "utf8");
+    if (options.html) await writeFile(options.html, toHtml(report, risk), "utf8");
+    if (options.risk) await writeFile(options.risk, `${JSON.stringify(risk, null, 2)}\n`, "utf8");
 
     const wroteFile = Boolean(
-      options.out || options.md || options.cbom || options.sarif || options.html,
+      options.out || options.md || options.cbom || options.sarif || options.html || options.risk,
     );
     if (!wroteFile) {
       stdout(`${toMarkdown(report)}\n`);
@@ -114,6 +130,8 @@ async function runScan(target: string, options: ScanOptions): Promise<void> {
           `low ${summary.low}, info ${summary.info}).\n`,
       );
     }
+
+    stderr(formatRisk(risk));
 
     if (options.failOn) {
       const threshold = options.failOn.toLowerCase();
@@ -129,6 +147,18 @@ async function runScan(target: string, options: ScanOptions): Promise<void> {
     stderr(`cryptosweep: ${describeError(err)}\n`);
     process.exitCode = 1;
   }
+}
+
+/** A compact crypto-agility risk summary for stderr (keeps stdout artifacts clean). */
+function formatRisk(risk: RiskModel): string {
+  const l = risk.ledger;
+  const a = risk.assumptions;
+  return (
+    `crypto-agility risk (data class ${a.dataClass}, ${a.horizonYears}yr horizon, CRQC assumed ${a.crqcYear}):\n` +
+    `  exposed(HNDL) ${l.exposedAssets}  overdue ${l.overdueAssets}  act-now(classical) ${l.actNowAssets}  ` +
+    `on-track ${l.onTrackAssets}  |  ${Math.round(l.exposureRiskYears)} risk-years exposed\n` +
+    `  ${l.headline}\n`
+  );
 }
 
 /** Render an error for the user, never leaving an empty message (e.g. a bare socket error). */
@@ -219,6 +249,9 @@ cli
   .option("--fail-on <severity>", "Exit non-zero if any finding is at/above this severity")
   .option("--allow-private", "Allow scanning non-public addresses (localhost, RFC 1918)")
   .option("--advisories", "Opt-in: cross-reference flagged deps against OSV.dev for known CVEs (network, off by default)")
+  .option("--data-class <class>", "Data confidentiality class for the Mosca-clock risk model (e.g. legal-privileged)")
+  .option("--crqc-year <year>", "Assumed year a cryptographically-relevant quantum computer exists (default 2035)")
+  .option("--risk <file>", "Write the crypto-agility risk model (Mosca clock + harvest ledger) to <file>")
   .option("--port <port>", "TLS port (defaults to 443 or the port in the target)")
   .option("--timeout <ms>", "TLS handshake timeout in milliseconds (default 10000)")
   .example("  cryptosweep scan https://www.example.com --out report.json --cbom cbom.json")

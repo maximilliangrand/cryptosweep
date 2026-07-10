@@ -51,6 +51,33 @@ interface Report {
   summary: Record<Severity | "findings", number>;
   findings: Finding[];
 }
+interface MoscaVerdict {
+  threat: string;
+  status: string;
+  horizonYears: number;
+  migrationYears: number;
+  crqcYear: number;
+  mustStartInYears: number;
+  rationale: string;
+}
+interface RiskAsset {
+  key: string;
+  label: string;
+  pq_status: string;
+  verdict: MoscaVerdict;
+}
+interface RiskModel {
+  assumptions: { crqcYear: number; crqcBasis: string; dataClass: string; horizonYears: number };
+  assets: RiskAsset[];
+  ledger: {
+    exposedAssets: number;
+    overdueAssets: number;
+    actNowAssets: number;
+    onTrackAssets: number;
+    exposureRiskYears: number;
+    headline: string;
+  };
+}
 
 const SEVERITIES: Severity[] = ["critical", "high", "medium", "low", "info"];
 const PQ_STATUSES = ["vulnerable", "transitional", "safe", "unknown"];
@@ -70,9 +97,75 @@ function pqIntent(status: string): Intent {
   return Intent.NONE;
 }
 
-function readReport(): Report {
+function readData(): { report: Report; risk: RiskModel | null } {
   const el = document.getElementById("data");
-  return JSON.parse(el?.textContent ?? "{}") as Report;
+  return JSON.parse(el?.textContent ?? "{}") as { report: Report; risk: RiskModel | null };
+}
+
+function moscaIntent(status: string): Intent {
+  if (status === "exposed") return Intent.DANGER;
+  if (status === "overdue" || status === "act-now") return Intent.WARNING;
+  if (status === "on-track") return Intent.SUCCESS;
+  return Intent.NONE;
+}
+
+function RiskBanner({ risk }: { risk: RiskModel }): JSX.Element {
+  const { ledger, assumptions } = risk;
+  const intent = ledger.exposedAssets > 0 ? Intent.DANGER : ledger.overdueAssets + ledger.actNowAssets > 0 ? Intent.WARNING : Intent.SUCCESS;
+  const urgent = risk.assets
+    .filter((a) => a.verdict.status === "exposed" || a.verdict.status === "overdue")
+    .sort((a, b) => a.verdict.mustStartInYears - b.verdict.mustStartInYears)
+    .slice(0, 6);
+  return (
+    <section className="csw-risk">
+      <Callout intent={intent} title="Quantum risk — Mosca clock">
+        {ledger.headline}
+        <div className="csw-risk-assume">
+          Assumptions: data class <strong>{assumptions.dataClass}</strong> ({assumptions.horizonYears}-year secrecy horizon), CRQC assumed{" "}
+          <strong>{assumptions.crqcYear}</strong>. {assumptions.crqcBasis}
+        </div>
+      </Callout>
+      <div className="csw-risk-tiles">
+        <Card className="csw-tile csw-tile-critical" elevation={Elevation.ONE}>
+          <div className="csw-tile-n">{ledger.exposedAssets}</div>
+          <div className="csw-tile-l">Exposed (HNDL)</div>
+        </Card>
+        <Card className="csw-tile csw-tile-high" elevation={Elevation.ONE}>
+          <div className="csw-tile-n">{ledger.overdueAssets}</div>
+          <div className="csw-tile-l">Overdue</div>
+        </Card>
+        <Card className="csw-tile csw-tile-medium" elevation={Elevation.ONE}>
+          <div className="csw-tile-n">{ledger.actNowAssets}</div>
+          <div className="csw-tile-l">Act now (classical)</div>
+        </Card>
+        <Card className="csw-tile" elevation={Elevation.ONE}>
+          <div className="csw-tile-n">{ledger.onTrackAssets}</div>
+          <div className="csw-tile-l">On track</div>
+        </Card>
+        <Card className="csw-tile csw-tile-critical" elevation={Elevation.ONE}>
+          <div className="csw-tile-n">{Math.round(ledger.exposureRiskYears)}</div>
+          <div className="csw-tile-l">Risk-years exposed</div>
+        </Card>
+      </div>
+      {urgent.length ? (
+        <div className="csw-clock">
+          {urgent.map((a) => (
+            <div key={a.key} className="csw-clock-row" title={a.verdict.rationale}>
+              <Tag intent={moscaIntent(a.verdict.status)} minimal>
+                {a.verdict.status}
+              </Tag>
+              <span className={Classes.MONOSPACE_TEXT}>{a.label}</span>
+              <span className={Classes.TEXT_MUTED}>
+                {a.verdict.status === "exposed"
+                  ? "already accruing exposure"
+                  : `start in ${a.verdict.mustStartInYears.toFixed(1)}y`}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 function Tile({ n, label, kind }: { n: number; label: string; kind: string }): JSX.Element {
@@ -147,7 +240,7 @@ function FindingCard({ f }: { f: Finding }): JSX.Element {
 }
 
 function App(): JSX.Element {
-  const report = useMemo(readReport, []);
+  const { report, risk } = useMemo(readData, []);
   const [query, setQuery] = useState("");
   const [sev, setSev] = useState<Set<Severity>>(new Set());
   const [pq, setPq] = useState<Set<string>>(new Set());
@@ -190,6 +283,8 @@ function App(): JSX.Element {
           <span className={Classes.TEXT_MUTED}>scanned {report.scanned_at}</span>
         </Navbar.Group>
       </Navbar>
+
+      {risk ? <RiskBanner risk={risk} /> : null}
 
       <div className="csw-tiles">
         <Tile n={report.summary?.critical} label="Critical" kind="critical" />

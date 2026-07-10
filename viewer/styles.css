@@ -177,6 +177,52 @@ body {
   padding: 8px 11px;
 }
 
+.csw-risk {
+  padding: 16px 20px 0;
+}
+.csw-risk .bp5-callout {
+  border-left: 3px solid;
+}
+.csw-risk-assume {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #abb3bf;
+}
+.csw-risk-tiles {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.csw-risk-tiles .csw-tile {
+  flex: 1 1 120px;
+  min-width: 120px;
+}
+.csw-clock {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.csw-clock-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel, #11161f);
+  background: #11161f;
+  border: 1px solid #232c3b;
+  border-radius: 8px;
+  padding: 7px 11px;
+  font-size: 13px;
+}
+.csw-clock-row .bp5-tag {
+  text-transform: capitalize;
+}
+.csw-clock-row span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+}
+
 .csw-footer {
   padding: 20px;
   border-top: 1px solid #383e47;

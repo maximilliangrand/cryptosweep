@@ -9,12 +9,13 @@
  * every value it renders.
  */
 import type { Report } from "../report";
+import type { RiskModel } from "../model/risk";
 import { VIEWER_SHELL_B64, VIEWER_DATA_PLACEHOLDER } from "./viewer-shell";
 
-/** Render a report as a single self-contained, offline HTML document. */
-export function toHtml(report: Report): string {
+/** Render a report (and optional risk model) as a single self-contained, offline HTML document. */
+export function toHtml(report: Report, risk?: RiskModel | null): string {
   const shell = Buffer.from(VIEWER_SHELL_B64, "base64").toString("utf8");
-  const data = JSON.stringify(report).replace(/</g, "\\u003c");
+  const data = JSON.stringify({ report, risk: risk ?? null }).replace(/</g, "\\u003c");
   // Use a replacer function so `$` sequences in the data are treated literally.
   return shell.replace(VIEWER_DATA_PLACEHOLDER, () => data);
 }
