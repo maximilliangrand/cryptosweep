@@ -8,7 +8,8 @@
     "node": ">=20"
   },
   "bin": {
-    "cryptosweep": "./dist/cli.js"
+    "cryptosweep": "./dist/cli.js",
+    "cryptosweep-mcp": "./dist/mcp.js"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",

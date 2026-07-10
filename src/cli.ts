@@ -9,19 +9,16 @@
  *   help            print usage
  */
 import { readFile, writeFile } from "node:fs/promises";
-import { existsSync, statSync } from "node:fs";
 import { cac } from "cac";
 import { buildReport, failsThreshold, toJson, toMarkdown } from "./report";
-import type { Finding, Report, Severity } from "./report";
+import type { Report, Severity } from "./report";
 import { toCbom } from "./output/cbom";
 import { toSarif } from "./output/sarif";
 import { toHtml } from "./output/viewer";
 import { assessRisk } from "./model/risk";
 import type { RiskModel } from "./model/risk";
 import { DATA_CLASSES, defaultProfile, isDataClassId } from "./model/estate";
-import { scanTls } from "./scanners/tls";
-import { cloneRepo, scanSource } from "./scanners/source";
-import { scanDeps } from "./scanners/deps";
+import { classifyTarget, scanTarget } from "./orchestrate";
 import { renderHtml, renderText } from "./email/render";
 import { sendEmail } from "./email/resend";
 import { VERSION } from "./version";
@@ -44,56 +41,19 @@ interface ScanOptions {
 
 const SEVERITIES: ReadonlySet<string> = new Set(["critical", "high", "medium", "low", "info"]);
 
-type Target =
-  | { kind: "github"; url: string }
-  | { kind: "host"; host: string; port: number }
-  | { kind: "path"; dir: string };
-
 const stdout = (text: string): void => void process.stdout.write(text);
 const stderr = (text: string): void => void process.stderr.write(text);
 
-function classifyTarget(target: string): Target {
-  if (existsSync(target) && statSync(target).isDirectory()) {
-    return { kind: "path", dir: target };
-  }
-
-  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(target) || target.startsWith("git@");
-  if (hasScheme) {
-    if (/(^|\/\/|@)github\.com[/:]/i.test(target) || target.endsWith(".git")) {
-      return { kind: "github", url: target };
-    }
-    try {
-      const url = new URL(target);
-      return { kind: "host", host: url.hostname, port: url.port ? Number(url.port) : 443 };
-    } catch {
-      /* fall through to bare-host handling */
-    }
-  }
-
-  if (/^[\w.-]+\/[\w.-]+$/.test(target) && !target.includes("..")) {
-    return { kind: "github", url: `https://github.com/${target.replace(/\.git$/, "")}.git` };
-  }
-
-  const [host, portStr] = target.split(":");
-  return { kind: "host", host: host || target, port: portStr ? Number(portStr) : 443 };
-}
-
 async function runScan(target: string, options: ScanOptions): Promise<void> {
   try {
-    const parsed = classifyTarget(target);
-    const timeoutMs = options.timeout ? Number(options.timeout) : 10_000;
-    const findings =
-      parsed.kind === "host"
-        ? await scanTls(parsed.host, {
-            port: options.port ? Number(options.port) : parsed.port,
-            timeoutMs,
-            allowPrivate: options.allowPrivate,
-          })
-        : parsed.kind === "path"
-          ? await scanLocalDir(parsed.dir, Boolean(options.advisories))
-          : await scanClonedRepo(parsed.url, Boolean(options.advisories));
+    const findings = await scanTarget(target, {
+      port: options.port ? Number(options.port) : undefined,
+      timeoutMs: options.timeout ? Number(options.timeout) : undefined,
+      allowPrivate: options.allowPrivate,
+      advisories: Boolean(options.advisories),
+    });
 
-    if (options.advisories && parsed.kind !== "host") {
+    if (options.advisories && classifyTarget(target).kind !== "host") {
       stderr(
         "cryptosweep: --advisories posts flagged, version-pinned dependencies to api.osv.dev for a known-CVE lookup.\n",
       );
@@ -171,23 +131,6 @@ function describeError(err: unknown): string {
   }
   const text = String(err);
   return text && text !== "[object Object]" ? text : "unknown error";
-}
-
-async function scanLocalDir(dir: string, advisories = false): Promise<Finding[]> {
-  const [source, deps] = await Promise.all([
-    scanSource(dir),
-    scanDeps(dir, advisories ? { advisories: { enabled: true } } : {}),
-  ]);
-  return [...source, ...deps];
-}
-
-async function scanClonedRepo(url: string, advisories = false): Promise<Finding[]> {
-  const repo = await cloneRepo(url);
-  try {
-    return await scanLocalDir(repo.dir, advisories);
-  } finally {
-    await repo.cleanup();
-  }
 }
 
 interface EmailOptions {
