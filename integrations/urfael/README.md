@@ -22,9 +22,10 @@ legal-privileged data" or "check what crypto stripe.com is using."
 
 ## Point the manifest at your build
 
-`plugin.json` runs the server with `["node", "<path>/dist/mcp.js"]`. Edit the `entry.cmd`
-path in `plugin.json` if your cryptosweep checkout is not at
-`/absolute/path/to/cryptosweep`.
+`plugin.json` runs the server with `["node", "/absolute/path/to/cryptosweep/dist/mcp.js"]`.
+Edit that `entry.cmd` path to the absolute path of your own cryptosweep checkout (Urfael
+runs the entry as a bare argv with no shell expansion, so it must be a literal path, not
+`~` or `$HOME`).
 
 ## Install and enable
 
