@@ -74,7 +74,7 @@ Every dependency finding carries at least one provenance reference (the standard
 Requires Node ≥ 20 and pnpm.
 
 ```bash
-git clone https://github.com/Grandillionaire/cryptosweep.git
+git clone https://github.com/maximilliangrand/cryptosweep.git
 cd cryptosweep
 pnpm install
 pnpm build
@@ -301,4 +301,4 @@ MIT, see [`LICENSE`](LICENSE).
 
 ## Author
 
-Built by [Grandillionaire](https://github.com/Grandillionaire). For commercial PQ-readiness consulting engagements, reach out via the cryptosweep landing page.
+Built by [maximilliangrand](https://github.com/maximilliangrand). For commercial PQ-readiness consulting engagements, reach out via the cryptosweep landing page.
