@@ -1,5 +1,5 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { callTool, dispatch, TOOLS } from "../src/mcp";
@@ -44,11 +44,18 @@ describe("MCP protocol", () => {
 
 describe("MCP scan tool", () => {
   let dir: string;
+  let previousRoot: string | undefined;
   beforeAll(async () => {
     dir = await mkdtemp(join(tmpdir(), "csw-mcp-"));
     await writeFile(join(dir, "package.json"), JSON.stringify({ dependencies: { jsonwebtoken: "^9.0.0" } }), "utf8");
+    previousRoot = process.env.CRYPTOSWEEP_MCP_ROOT;
+    process.env.CRYPTOSWEEP_MCP_ROOT = dir;
   });
-  afterAll(async () => rm(dir, { recursive: true, force: true }));
+  afterAll(async () => {
+    if (previousRoot === undefined) delete process.env.CRYPTOSWEEP_MCP_ROOT;
+    else process.env.CRYPTOSWEEP_MCP_ROOT = previousRoot;
+    await rm(dir, { recursive: true, force: true });
+  });
 
   it("scans a local directory and returns findings plus the risk model", async () => {
     const text = await callTool("scan", { target: dir, dataClass: "legal-privileged" });
@@ -59,5 +66,17 @@ describe("MCP scan tool", () => {
 
   it("rejects an invalid data class", async () => {
     await expect(callTool("scan", { target: dir, dataClass: "nonsense" })).rejects.toThrow(/dataClass must be one of/);
+  });
+
+  it("refuses a filesystem target outside the configured root", async () => {
+    await expect(callTool("scan", { target: join(dir, "..") })).rejects.toThrow(/must be inside/);
+    await expect(callTool("scan", { target: homedir() })).rejects.toThrow(/must be inside/);
+  });
+
+  it("does not expose an SSRF escape hatch through the tool schema", async () => {
+    const schema = TOOLS.find((t) => t.name === "scan")?.inputSchema as { properties: Record<string, unknown> };
+    expect(Object.keys(schema.properties)).not.toContain("allowPrivate");
+    // Even if a client sends it anyway, the guard still refuses loopback.
+    await expect(callTool("scan", { target: "127.0.0.1", allowPrivate: true })).rejects.toThrow(/non-public/);
   });
 });

@@ -125,14 +125,23 @@ export function signatureAlgorithmName(oid: string | null): string | null {
  * NIST CSOR / IETF LAMPS drafts for ML-DSA and SLH-DSA.
  */
 const SIGNATURE_ALGORITHM_OIDS: Readonly<Record<string, string>> = {
+  // Classically broken digests. Omitting these is worse than not knowing them:
+  // an unrecognized OID reads as "nothing to see here" on the worst algorithms
+  // in the corpus (MD5 collisions forged a rogue CA in 2008 and drove Flame).
+  "1.2.840.113549.1.1.2": "md2WithRSAEncryption",
+  "1.2.840.113549.1.1.3": "md4WithRSAEncryption",
+  "1.2.840.113549.1.1.4": "md5WithRSAEncryption",
   "1.2.840.113549.1.1.5": "sha1WithRSAEncryption",
+  "1.2.840.113549.1.1.14": "sha224WithRSAEncryption",
   "1.2.840.113549.1.1.11": "sha256WithRSAEncryption",
   "1.2.840.113549.1.1.12": "sha384WithRSAEncryption",
   "1.2.840.113549.1.1.13": "sha512WithRSAEncryption",
   "1.2.840.113549.1.1.10": "rsassaPss",
   "1.2.840.10040.4.3": "dsaWithSHA1",
+  "2.16.840.1.101.3.4.3.1": "dsaWithSHA224",
   "2.16.840.1.101.3.4.3.2": "dsaWithSHA256",
   "1.2.840.10045.4.1": "ecdsaWithSHA1",
+  "1.2.840.10045.4.3.1": "ecdsaWithSHA224",
   "1.2.840.10045.4.3.2": "ecdsaWithSHA256",
   "1.2.840.10045.4.3.3": "ecdsaWithSHA384",
   "1.2.840.10045.4.3.4": "ecdsaWithSHA512",
@@ -142,5 +151,17 @@ const SIGNATURE_ALGORITHM_OIDS: Readonly<Record<string, string>> = {
   "2.16.840.1.101.3.4.3.17": "ML-DSA-44",
   "2.16.840.1.101.3.4.3.18": "ML-DSA-65",
   "2.16.840.1.101.3.4.3.19": "ML-DSA-87",
+  // All twelve SLH-DSA parameter sets (NIST CSOR 2.16.840.1.101.3.4.3.20-.31).
   "2.16.840.1.101.3.4.3.20": "SLH-DSA-SHA2-128s",
+  "2.16.840.1.101.3.4.3.21": "SLH-DSA-SHA2-128f",
+  "2.16.840.1.101.3.4.3.22": "SLH-DSA-SHA2-192s",
+  "2.16.840.1.101.3.4.3.23": "SLH-DSA-SHA2-192f",
+  "2.16.840.1.101.3.4.3.24": "SLH-DSA-SHA2-256s",
+  "2.16.840.1.101.3.4.3.25": "SLH-DSA-SHA2-256f",
+  "2.16.840.1.101.3.4.3.26": "SLH-DSA-SHAKE-128s",
+  "2.16.840.1.101.3.4.3.27": "SLH-DSA-SHAKE-128f",
+  "2.16.840.1.101.3.4.3.28": "SLH-DSA-SHAKE-192s",
+  "2.16.840.1.101.3.4.3.29": "SLH-DSA-SHAKE-192f",
+  "2.16.840.1.101.3.4.3.30": "SLH-DSA-SHAKE-256s",
+  "2.16.840.1.101.3.4.3.31": "SLH-DSA-SHAKE-256f",
 };

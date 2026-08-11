@@ -60,8 +60,43 @@ export function isQuantumVulnerableKey(keyType: KeyType): boolean {
   return keyType !== "unknown";
 }
 
-/** Post-quantum posture and severity for a certificate/identity public key. */
-export function keyPosture(keyType: KeyType): {
+/** Approximate security strength (bits) of a named elliptic curve. */
+function curveStrengthBits(curve: string | null): number | null {
+  if (!curve) return null;
+  const match = /(\d{3})/.exec(curve);
+  return match?.[1] ? Number(match[1]) : null;
+}
+
+/**
+ * Is a key classically broken *today*, independent of the quantum timeline?
+ *
+ * SP 800-131A Rev.2 disallows RSA/DSA below 2048 bits and ECC below a 224-bit
+ * curve. This is a different question from "does Shor break it" — every key
+ * below answers yes to both, and conflating the two is what made every
+ * certificate on the internet look equally urgent.
+ */
+export function isClassicallyWeakKey(keyType: KeyType, bits: number | null, curve: string | null): boolean {
+  if (keyType === "rsa" || keyType === "rsa-pss" || keyType === "dsa") return bits !== null && bits < 2048;
+  if (keyType === "ec") {
+    const strength = curveStrengthBits(curve);
+    return strength !== null && strength < 224;
+  }
+  return false;
+}
+
+/**
+ * Post-quantum posture and severity for a certificate/identity public key.
+ *
+ * Severity grades *classical* strength; `pq_status` carries the quantum verdict.
+ * A sound RSA-4096 key and a factorable RSA-512 key are both `vulnerable` to a
+ * CRQC, but only one of them is an emergency, and only that distinction makes a
+ * `--fail-on high` CI gate mean anything.
+ */
+export function keyPosture(
+  keyType: KeyType,
+  bits: number | null = null,
+  curve: string | null = null,
+): {
   pq_status: PqStatus;
   severity: Severity;
   references: Reference[];
@@ -69,7 +104,12 @@ export function keyPosture(keyType: KeyType): {
   if (keyType === "unknown") {
     return { pq_status: "unknown", severity: "info", references: [] };
   }
-  return { pq_status: "vulnerable", severity: "high", references: [REFS.fips204, REFS.cnsa2, REFS.ir8547] };
+  const references = [REFS.fips204, REFS.cnsa2, REFS.ir8547];
+  if (isClassicallyWeakKey(keyType, bits, curve)) {
+    const severity: Severity = bits !== null && bits < 1024 ? "critical" : "high";
+    return { pq_status: "vulnerable", severity, references: [...references, REFS.sp800131a] };
+  }
+  return { pq_status: "vulnerable", severity: "medium", references };
 }
 
 /** A canonical, inventory-friendly label for a public key, e.g. "RSA-2048", "ECDSA-P-256". */

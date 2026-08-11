@@ -9,6 +9,7 @@ import type { Finding } from "./report";
 import { scanTls } from "./scanners/tls";
 import { cloneRepo, scanSource } from "./scanners/source";
 import { scanDeps } from "./scanners/deps";
+import { reconcile } from "./reconcile";
 
 export type Target =
   | { kind: "github"; url: string }
@@ -49,13 +50,13 @@ export function classifyTarget(target: string): Target {
   return { kind: "host", host: host || target, port: portStr ? Number(portStr) : 443 };
 }
 
-/** Scan a local directory: source + dependency manifests. */
+/** Scan a local directory: source + dependency manifests, then reconcile the two. */
 export async function scanLocalDir(dir: string, advisories = false): Promise<Finding[]> {
   const [source, deps] = await Promise.all([
     scanSource(dir),
     scanDeps(dir, advisories ? { advisories: { enabled: true } } : {}),
   ]);
-  return [...source, ...deps];
+  return reconcile([...source, ...deps]);
 }
 
 /** Shallow-clone a repo, scan it, and clean up. */

@@ -8,16 +8,25 @@
  * whole protocol is a handful of methods, implemented by hand.
  *
  * Tools:
- *   - scan(target, dataClass?, crqcYear?, advisories?, allowPrivate?)
+ *   - scan(target, dataClass?, crqcYear?, advisories?)
  *   - data_classes()
  *
  * Everything except JSON-RPC frames goes to stderr; stdout is protocol-only.
+ *
+ * Trust boundary: an MCP server is reachable by whatever text the model has been
+ * fed, so the caller is never assumed to be the operator. Two capabilities the
+ * CLI legitimately offers are therefore withheld here: the SSRF guard cannot be
+ * switched off (no `allowPrivate`), and a filesystem target must live under
+ * `CRYPTOSWEEP_MCP_ROOT` (the working directory by default), so a prompt-injected
+ * client cannot walk the disk probing for `~/.ssh` or enumerate internal TLS
+ * services.
  */
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { resolve, sep } from "node:path";
 import { buildReport } from "./report";
 import type { Report } from "./report";
-import { scanTarget } from "./orchestrate";
+import { classifyTarget, scanTarget } from "./orchestrate";
 import { assessRisk } from "./model/risk";
 import type { RiskModel } from "./model/risk";
 import { DATA_CLASSES, defaultProfile, isDataClassId } from "./model/estate";
@@ -40,7 +49,6 @@ const TOOLS = [
         },
         crqcYear: { type: "integer", description: "assumed year a quantum computer can break current crypto (default 2035)" },
         advisories: { type: "boolean", description: "cross-reference flagged deps against OSV.dev for known CVEs (network)" },
-        allowPrivate: { type: "boolean", description: "allow scanning non-public hosts (localhost / RFC 1918)" },
       },
       required: ["target"],
     },
@@ -76,6 +84,23 @@ function num(value: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+/** The directory subtree filesystem targets are confined to. */
+function scanRoot(): string {
+  return resolve(process.env.CRYPTOSWEEP_MCP_ROOT ?? process.cwd());
+}
+
+/** Throw unless a directory target resolves inside the configured root. */
+function assertWithinRoot(target: string): void {
+  if (classifyTarget(target).kind !== "path") return;
+  const root = scanRoot();
+  const resolved = resolve(target);
+  if (resolved !== root && !resolved.startsWith(root.endsWith(sep) ? root : `${root}${sep}`)) {
+    throw new Error(
+      `Refusing to scan ${target}: filesystem targets must be inside ${root}. Set CRYPTOSWEEP_MCP_ROOT to widen the scope.`,
+    );
+  }
+}
+
 async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
   if (name === "data_classes") {
     return DATA_CLASSES.map((c) => `${c.id}: ${c.label} (${c.horizonYears}-year secrecy horizon)`).join("\n");
@@ -87,10 +112,10 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<st
     if (dataClass && !isDataClassId(dataClass)) {
       throw new Error(`dataClass must be one of: ${DATA_CLASSES.map((c) => c.id).join(", ")}`);
     }
-    const findings = await scanTarget(target, {
-      advisories: Boolean(args.advisories),
-      allowPrivate: Boolean(args.allowPrivate),
-    });
+    assertWithinRoot(target);
+    // allowPrivate is deliberately not plumbed through: the SSRF guard is the
+    // only thing standing between an injected prompt and the internal network.
+    const findings = await scanTarget(target, { advisories: Boolean(args.advisories) });
     const report = buildReport(target, findings);
     const profile = defaultProfile(report.scanned_at, { dataClassId: dataClass, crqcYear: num(args.crqcYear) });
     const risk = assessRisk(target, report.findings, profile);
@@ -157,7 +182,6 @@ export { callTool, TOOLS };
 
 function main(): void {
   const rl = createInterface({ input: process.stdin });
-  let chain: Promise<void> = Promise.resolve();
   rl.on("line", (line) => {
     const trimmed = line.trim();
     if (!trimmed) return;
@@ -167,9 +191,12 @@ function main(): void {
     } catch {
       return; // ignore non-JSON noise; never crash the stream
     }
-    chain = chain
-      .then(async () => {
-        const response = await dispatch(message);
+    // Each message is dispatched independently. Serializing them behind one
+    // promise chain meant a multi-second scan blocked every later frame —
+    // including ping and notifications/cancelled — and clients timed the
+    // server out mid-scan. Responses are correlated by id, so order is free.
+    void dispatch(message)
+      .then((response) => {
         if (response) send(response);
       })
       .catch(() => undefined);

@@ -15,7 +15,7 @@ export { buildReport, failsThreshold, normalizeFinding, toJson, toMarkdown } fro
 export { toCbom, describeAlgorithm } from "./output/cbom";
 export { toSarif } from "./output/sarif";
 export { toHtml } from "./output/viewer";
-export type { DataClass, EstateProfile, Obligation, QuantumAssumption } from "./model/estate";
+export type { DataClass, EstateProfile, Obligation, ObligationScope, QuantumAssumption } from "./model/estate";
 export { DATA_CLASSES, defaultProfile, isDataClassId } from "./model/estate";
 export type {
   CryptoAsset,
@@ -31,6 +31,7 @@ export type { KeyType } from "./crypto";
 export {
   REFS,
   curveFriendlyName,
+  isClassicallyWeakKey,
   isQuantumVulnerableKey,
   keyAlgorithmLabel,
   keyPosture,
@@ -45,3 +46,4 @@ export type { DepsScanOptions, ParsedDep } from "./scanners/deps";
 export { matchDeps, scanDeps } from "./scanners/deps";
 export type { Ecosystem, RegistryEntry } from "./scanners/deps/registry";
 export { REGISTRY, lookupEntry } from "./scanners/deps/registry";
+export { reconcile } from "./reconcile";

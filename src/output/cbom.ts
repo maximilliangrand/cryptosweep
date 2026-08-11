@@ -57,57 +57,124 @@ export function describeAlgorithm(label: string): AlgorithmDescriptor {
   return { primitive: "unknown", nistQuantumSecurityLevel: 0 };
 }
 
+/** CycloneDX 1.6 `cryptoProperties.assetType` values we emit. */
+type AssetType = "algorithm" | "certificate" | "related-crypto-material" | "protocol";
+
 interface CryptoComponent {
   type: "cryptographic-asset";
   "bom-ref": string;
   name: string;
   cryptoProperties: {
-    assetType: "algorithm";
-    algorithmProperties: {
+    assetType: AssetType;
+    algorithmProperties?: {
       primitive: Primitive;
       parameterSetIdentifier?: string;
       nistQuantumSecurityLevel: number;
     };
+    relatedCryptoMaterialProperties?: { type: string };
+    certificateProperties?: Record<string, string>;
+    protocolProperties?: { type: string; version?: string };
     oid?: string;
   };
   properties: { name: string; value: string }[];
 }
 
-/** Collapse findings into one component per distinct algorithm, most-severe evidence kept. */
+function assetProperties(finding: Finding): { name: string; value: string }[] {
+  return [
+    { name: "cryptosweep:pq_status", value: finding.pq_status },
+    { name: "cryptosweep:severity", value: finding.severity },
+    { name: "cryptosweep:confidence", value: finding.confidence ?? "medium" },
+    { name: "cryptosweep:finding", value: finding.id },
+  ];
+}
+
+/**
+ * Describe a finding that names no algorithm as the cryptographic asset it
+ * actually is. A hardcoded private key, a certificate chain and a negotiated
+ * protocol are all assets a CBOM is supposed to inventory; CycloneDX 1.6 has an
+ * `assetType` for each. Dropping them silently produced a compliance artifact
+ * whose consumer could not distinguish "not present" from "not emitted".
+ */
+function describeNonAlgorithmAsset(finding: Finding): Pick<CryptoComponent, "name" | "cryptoProperties"> | null {
+  const ruleId = finding.ruleId ?? "";
+  if (finding.category === "keys") {
+    const isPrivate = /private/i.test(finding.title);
+    return {
+      name: isPrivate ? "Hardcoded private key material" : "Embedded public key material",
+      cryptoProperties: {
+        assetType: "related-crypto-material",
+        relatedCryptoMaterialProperties: { type: isPrivate ? "private-key" : "public-key" },
+      },
+    };
+  }
+  if (ruleId === "tls/chain-classical") {
+    return {
+      name: "TLS certificate chain",
+      cryptoProperties: { assetType: "certificate", certificateProperties: { certificateFormat: "X.509" } },
+    };
+  }
+  if (ruleId === "tls/negotiated-protocol") {
+    const version = /TLSv([\d.]+)/.exec(finding.title)?.[1];
+    return {
+      name: "Negotiated TLS protocol",
+      cryptoProperties: { assetType: "protocol", protocolProperties: { type: "tls", ...(version ? { version } : {}) } },
+    };
+  }
+  if (finding.category === "tls" || finding.category === "jwt") {
+    return {
+      name: finding.title,
+      cryptoProperties: {
+        assetType: "related-crypto-material",
+        relatedCryptoMaterialProperties: { type: "unknown" },
+      },
+    };
+  }
+  return null; // source/deps findings without an algorithm are code sites, not assets
+}
+
+/** Collapse findings into one component per distinct asset, first occurrence kept. */
 function toComponents(findings: Finding[]): CryptoComponent[] {
-  const byAlgorithm = new Map<string, Finding>();
+  const components = new Map<string, CryptoComponent>();
+
+  const add = (key: string, component: CryptoComponent): void => {
+    if (!components.has(key)) components.set(key, component);
+  };
+
   for (const finding of findings) {
-    if (!finding.algorithm) continue;
-    const existing = byAlgorithm.get(finding.algorithm);
-    if (!existing) byAlgorithm.set(finding.algorithm, finding);
+    if (finding.algorithm) {
+      const desc = describeAlgorithm(finding.algorithm);
+      const component: CryptoComponent = {
+        type: "cryptographic-asset",
+        "bom-ref": `crypto/${slug(finding.algorithm)}`,
+        name: finding.algorithm,
+        cryptoProperties: {
+          assetType: "algorithm",
+          algorithmProperties: {
+            primitive: desc.primitive,
+            nistQuantumSecurityLevel: desc.nistQuantumSecurityLevel,
+          },
+        },
+        properties: assetProperties(finding),
+      };
+      if (desc.parameterSetIdentifier && component.cryptoProperties.algorithmProperties) {
+        component.cryptoProperties.algorithmProperties.parameterSetIdentifier = desc.parameterSetIdentifier;
+      }
+      if (desc.oid) component.cryptoProperties.oid = desc.oid;
+      add(finding.algorithm, component);
+      continue;
+    }
+    const asset = describeNonAlgorithmAsset(finding);
+    if (!asset) continue;
+    add(asset.name, {
+      type: "cryptographic-asset",
+      "bom-ref": `crypto/${slug(asset.name)}`,
+      name: asset.name,
+      cryptoProperties: asset.cryptoProperties,
+      properties: assetProperties(finding),
+    });
   }
 
-  return [...byAlgorithm.entries()].map(([algorithm, finding]) => {
-    const desc = describeAlgorithm(algorithm);
-    const component: CryptoComponent = {
-      type: "cryptographic-asset",
-      "bom-ref": `crypto/${slug(algorithm)}`,
-      name: algorithm,
-      cryptoProperties: {
-        assetType: "algorithm",
-        algorithmProperties: {
-          primitive: desc.primitive,
-          nistQuantumSecurityLevel: desc.nistQuantumSecurityLevel,
-        },
-      },
-      properties: [
-        { name: "cryptosweep:pq_status", value: finding.pq_status },
-        { name: "cryptosweep:severity", value: finding.severity },
-        { name: "cryptosweep:confidence", value: finding.confidence ?? "medium" },
-        { name: "cryptosweep:finding", value: finding.id },
-      ],
-    };
-    if (desc.parameterSetIdentifier) {
-      component.cryptoProperties.algorithmProperties.parameterSetIdentifier = desc.parameterSetIdentifier;
-    }
-    if (desc.oid) component.cryptoProperties.oid = desc.oid;
-    return component;
-  });
+  return [...components.values()];
 }
 
 function slug(value: string): string {

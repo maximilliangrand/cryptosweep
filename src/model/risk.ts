@@ -16,7 +16,7 @@
  *     board as "fix now", but never on the quantum clock and never in the ledger.
  */
 import type { Finding, PqStatus, Severity } from "../report";
-import type { DataClass, EstateProfile, Obligation } from "./estate";
+import type { DataClass, EstateProfile, Obligation, ObligationScope } from "./estate";
 
 export type ThreatModel = "harvest-now" | "forge-later" | "classical" | "not-applicable";
 export type MoscaStatus = "exposed" | "overdue" | "on-track" | "act-now" | "not-applicable";
@@ -101,11 +101,26 @@ const KEY_EXCHANGE = /mlkem|kyber|x25519|x448|ecdh|\bdh\b|\bkem\b|key.?exchange|
 /** Dependencies whose primary job is key exchange / TLS transport -> harvest-now. */
 const HARVEST_DEPS = new Set(["rustls", "ring", "openssl", "x25519-dalek", "pyopenssl", "paramiko", "node-forge"]);
 
+/**
+ * Key labels below the SP 800-131A classical minimum (RSA/DSA < 2048 bits,
+ * ECC < 224-bit curve). These are broken without a quantum computer, so they
+ * belong on the act-now board, not on the Mosca clock.
+ */
+function isClassicallyWeakLabel(algorithm: string | undefined): boolean {
+  if (!algorithm) return false;
+  const integer = /^(?:rsa|rsa-pss|dsa)-(\d+)$/i.exec(algorithm);
+  if (integer?.[1]) return Number(integer[1]) < 2048;
+  const elliptic = /^ecdsa-(?:p-|secp|sect|brainpoolp)?(\d+)/i.exec(algorithm);
+  if (elliptic?.[1]) return Number(elliptic[1]) < 224;
+  return false;
+}
+
 /** Classify a cryptographic asset into its actual threat model. */
 export function classifyThreat(finding: Finding): ThreatModel {
   if (finding.pq_status !== "vulnerable") return "not-applicable";
   const label = `${finding.algorithm ?? ""} ${finding.ruleId ?? ""} ${finding.title}`.toLowerCase();
   if (CLASSICAL.test(finding.algorithm ?? label)) return "classical";
+  if (isClassicallyWeakLabel(finding.algorithm)) return "classical";
   if (finding.category === "tls" && /hybrid-kex/.test(finding.ruleId ?? "")) return "harvest-now";
   if (finding.category === "deps") {
     const name = (finding.ruleId ?? "").replace(/^deps\/[a-z]+-/, "");
@@ -253,6 +268,31 @@ export function assessRisk(target: string, findings: Finding[], profile: EstateP
   };
 }
 
+/** The failure mode an asset's threat model represents, in obligation terms. */
+const THREAT_SCOPE: Record<ThreatModel, ObligationScope | null> = {
+  "harvest-now": "confidentiality",
+  "forge-later": "identity",
+  classical: "classical-strength",
+  "not-applicable": null,
+};
+
+/** Statuses that mean an asset is not where its obligation requires it to be. */
+const BREACHING_STATUSES: ReadonlySet<MoscaStatus> = new Set<MoscaStatus>(["exposed", "overdue", "act-now"]);
+
+/**
+ * Does this asset put the estate in breach of this obligation?
+ *
+ * Attribution is by failure mode: an ABA 1.6(c) competence duty is breached by
+ * a confidentiality exposure or by already-broken crypto, while the HNDL
+ * obligation is breached only by the former. Counting every off-track asset
+ * against every obligation produced one constant dressed as an attribution.
+ */
+function breaches(asset: CryptoAsset, obligation: Obligation): boolean {
+  if (!BREACHING_STATUSES.has(asset.verdict.status)) return false;
+  const scope = THREAT_SCOPE[asset.verdict.threat];
+  return scope !== null && obligation.scopes.includes(scope);
+}
+
 function buildLedger(assets: CryptoAsset[], dataClass: DataClass): HarvestLedger {
   const exposed = assets.filter((a) => a.verdict.threat === "harvest-now" && a.verdict.status === "exposed");
   const overdue = assets.filter((a) => a.verdict.status === "overdue").length;
@@ -262,7 +302,7 @@ function buildLedger(assets: CryptoAsset[], dataClass: DataClass): HarvestLedger
 
   const byObligation = dataClass.obligations.map((o) => ({
     obligation: o.label,
-    assets: assets.filter((a) => a.verdict.status === "exposed" || a.verdict.status === "overdue").length,
+    assets: assets.filter((a) => breaches(a, o)).length,
   }));
 
   const headline =
@@ -312,4 +352,4 @@ function buildGraph(target: string, assets: CryptoAsset[], dataClass: DataClass)
 }
 
 /** Re-export for consumers that want obligation types without importing estate. */
-export type { Obligation };
+export type { Obligation, ObligationScope };

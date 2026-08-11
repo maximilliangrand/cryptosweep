@@ -60,14 +60,45 @@ function toPascal(id: string): string {
     .join("");
 }
 
+interface SarifLocation {
+  physicalLocation: { artifactLocation: { uri: string }; region?: { startLine: number } };
+  logicalLocations?: { name: string; kind: string; fullyQualifiedName: string }[];
+}
+
 interface SarifResult {
   ruleId: string;
   level: Level;
   message: { text: string };
-  locations?: {
-    physicalLocation: { artifactLocation: { uri: string }; region?: { startLine: number } };
-  }[];
+  locations?: SarifLocation[];
   properties: Record<string, string>;
+}
+
+/**
+ * Where a finding happened, in SARIF terms.
+ *
+ * Every result needs one: GitHub code scanning anchors alerts to a location and
+ * drops (or roots) results without one, so a location-less TLS finding is a
+ * finding nobody ever sees. A network probe has no file, so its host:port is
+ * expressed as a `tls://` artifact plus a logical location naming the endpoint.
+ */
+function locationFor(finding: Finding): SarifLocation | null {
+  const { path, line, host, port } = finding.location ?? {};
+  if (path) {
+    return {
+      physicalLocation: {
+        artifactLocation: { uri: path },
+        ...(line ? { region: { startLine: line } } : {}),
+      },
+    };
+  }
+  if (host) {
+    const endpoint = port ? `${host}:${port}` : host;
+    return {
+      physicalLocation: { artifactLocation: { uri: `tls://${endpoint}` } },
+      logicalLocations: [{ name: endpoint, kind: "resource", fullyQualifiedName: endpoint }],
+    };
+  }
+  return null;
 }
 
 function resultFor(finding: Finding): SarifResult {
@@ -86,17 +117,8 @@ function resultFor(finding: Finding): SarifResult {
       evidence: finding.evidence,
     },
   };
-  // Physical location only when the finding maps to a file (source/deps).
-  if (finding.location?.path) {
-    result.locations = [
-      {
-        physicalLocation: {
-          artifactLocation: { uri: finding.location.path },
-          ...(finding.location.line ? { region: { startLine: finding.location.line } } : {}),
-        },
-      },
-    ];
-  }
+  const location = locationFor(finding);
+  if (location) result.locations = [location];
   return result;
 }
 

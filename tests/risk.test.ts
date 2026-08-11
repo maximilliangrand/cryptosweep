@@ -95,6 +95,39 @@ describe("harvest-exposure ledger", () => {
   });
 });
 
+describe("per-obligation attribution", () => {
+  it("attributes assets to the obligation each one actually breaches", () => {
+    const profile = defaultProfile(TODAY, { dataClassId: "legal-privileged", crqcYear: 2035 });
+    const risk = assessRisk(
+      "acme",
+      [
+        finding({ id: "kex", category: "tls", ruleId: "tls/hybrid-kex", algorithm: "X25519" }), // confidentiality
+        finding({ id: "md5", category: "source", algorithm: "MD5" }), // classical strength
+        finding({ id: "sig", category: "tls", ruleId: "tls/leaf-public-key", algorithm: "RSA-2048" }), // identity, on track
+      ],
+      profile,
+    );
+    const rows = risk.ledger.byObligation;
+    expect(rows).toHaveLength(2); // ABA 1.6(c) + HNDL
+
+    const hndl = rows.find((r) => /Harvest-now/.test(r.obligation));
+    const aba = rows.find((r) => /ABA Model Rule/.test(r.obligation));
+    // HNDL is breached by the exposed key exchange only.
+    expect(hndl?.assets).toBe(1);
+    // The competence duty additionally covers already-broken crypto (MD5).
+    expect(aba?.assets).toBe(2);
+    // The old code reported one constant for every obligation.
+    expect(hndl?.assets).not.toBe(aba?.assets);
+  });
+
+  it("puts a sub-2048-bit RSA key on the act-now board, not the quantum clock", () => {
+    const profile = defaultProfile(TODAY, { dataClassId: "legal-privileged", crqcYear: 2035 });
+    const risk = assessRisk("acme", [finding({ category: "tls", ruleId: "tls/leaf-public-key", algorithm: "RSA-1024" })], profile);
+    expect(risk.assets[0]?.verdict.threat).toBe("classical");
+    expect(risk.assets[0]?.verdict.status).toBe("act-now");
+  });
+});
+
 describe("ontology graph", () => {
   it("links the system to its data class, obligations, and assets", () => {
     const profile = defaultProfile(TODAY, { dataClassId: "legal-privileged" });
