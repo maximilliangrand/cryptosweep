@@ -35,6 +35,32 @@ const FINDINGS: Finding[] = [
   },
 ];
 
+const CHAIN_FINDING: Finding = {
+  id: "CSW-TLS-003",
+  ruleId: "tls/chain-classical",
+  severity: "medium",
+  category: "tls",
+  title: "Certificate chain has 1 intermediate(s) using classical crypto",
+  evidence: "WE1 (ECDSA P-256)",
+  location: { host: "example.com", port: 443 },
+  pq_status: "vulnerable",
+  confidence: "confirmed",
+  recommendation: "The whole chain must migrate.",
+};
+
+const PROTOCOL_FINDING: Finding = {
+  id: "CSW-TLS-004",
+  ruleId: "tls/negotiated-protocol",
+  severity: "info",
+  category: "tls",
+  title: "Negotiated TLSv1.3",
+  evidence: "example.com:443",
+  location: { host: "example.com", port: 443 },
+  pq_status: "transitional",
+  confidence: "confirmed",
+  recommendation: "Keep TLS 1.3 enabled.",
+};
+
 describe("describeAlgorithm", () => {
   it("classifies classical algorithms as quantum-broken (level 0)", () => {
     expect(describeAlgorithm("RSA-2048")).toMatchObject({ primitive: "signature", nistQuantumSecurityLevel: 0 });
@@ -68,6 +94,23 @@ describe("toCbom", () => {
     const report = buildReport("example.com", FINDINGS, AT);
     expect(toCbom(report)).toBe(toCbom(report));
   });
+
+  it("inventories assets that name no algorithm instead of silently dropping them", () => {
+    const report = buildReport("example.com", [...FINDINGS, CHAIN_FINDING, PROTOCOL_FINDING], AT);
+    const doc = JSON.parse(toCbom(report)) as { components: Array<{ name: string; cryptoProperties: Record<string, unknown> }> };
+
+    // The critical hardcoded private key was absent from the "bill of materials".
+    const key = doc.components.find((c) => /private key material/i.test(c.name));
+    expect(key?.cryptoProperties.assetType).toBe("related-crypto-material");
+    expect(key?.cryptoProperties.relatedCryptoMaterialProperties).toEqual({ type: "private-key" });
+
+    const chain = doc.components.find((c) => c.name === "TLS certificate chain");
+    expect(chain?.cryptoProperties.assetType).toBe("certificate");
+
+    const protocol = doc.components.find((c) => c.name === "Negotiated TLS protocol");
+    expect(protocol?.cryptoProperties.assetType).toBe("protocol");
+    expect(protocol?.cryptoProperties.protocolProperties).toEqual({ type: "tls", version: "1.3" });
+  });
 });
 
 describe("toSarif", () => {
@@ -86,6 +129,28 @@ describe("toSarif", () => {
 
     const rule = run.tool.driver.rules.find((r: { id: string }) => r.id === "keys/private-key");
     expect(rule.properties["security-severity"]).toBe("9.5");
+  });
+
+  it("anchors network findings to host:port so code scanning does not drop them", () => {
+    const report = buildReport("example.com", [...FINDINGS, CHAIN_FINDING, PROTOCOL_FINDING], AT);
+    const log = JSON.parse(toSarif(report)) as {
+      runs: Array<{ results: Array<{ ruleId: string; locations?: Array<Record<string, unknown>> }> }>;
+    };
+    const results = log.runs[0]?.results ?? [];
+    // Every result must carry a location; TLS results used to carry none at all.
+    expect(results.filter((r) => (r.locations ?? []).length > 0)).toHaveLength(results.length);
+
+    const tls = results.find((r) => r.ruleId === "tls/leaf-public-key");
+    const location = tls?.locations?.[0] as {
+      physicalLocation: { artifactLocation: { uri: string } };
+      logicalLocations: Array<{ name: string; kind: string }>;
+    };
+    expect(location.physicalLocation.artifactLocation.uri).toBe("tls://example.com:443");
+    expect(location.logicalLocations[0]).toEqual({
+      name: "example.com:443",
+      kind: "resource",
+      fullyQualifiedName: "example.com:443",
+    });
   });
 });
 

@@ -59,7 +59,7 @@ If your customer's data still matters in 2040, you are the user.
 | **Source code** | `source` | Weak `node:crypto` usage (MD5 / SHA-1 / DES / 3DES / RC4), `jsonwebtoken` algorithms, hardcoded RSA/EC private keys, embedded PEM public keys |
 | **Dependencies** | `deps` | `package.json` / `pnpm-lock.yaml`, `requirements.txt` / `pyproject.toml`, `Cargo.toml`, flagged against an internal registry of PQ-vulnerable libs with NIST-aligned alternatives |
 
-All three run automatically against a local directory or shallow-cloned GitHub repo. TLS-only mode runs against a hostname.
+The `source` and `deps` scanners run together against a local directory or a shallow-cloned GitHub repo; `tls` runs against a hostname, since a repository has no endpoint of its own to handshake with.
 
 Every dependency finding carries at least one provenance reference (the standard or advisory that justifies flagging it). The JS/TS source scanner parses the code with an AST rather than grepping, so a weak-crypto call in a comment or an unrelated string is not a false positive, and an import-resolved call is reported at `confirmed` confidence.
 
@@ -82,7 +82,7 @@ pnpm build
 # TLS-only scan of a hostname
 node dist/cli.js scan https://www.example.com
 
-# Full scan of a GitHub repo (TLS + source + deps)
+# Full scan of a GitHub repo (source + deps)
 node dist/cli.js scan facebook/react
 
 # Local directory, every output format at once
@@ -102,7 +102,7 @@ Output goes to stdout as Markdown by default, or to any combination of the outpu
 |---|---|---|
 | `--out` | JSON | The full report, machine-readable |
 | `--md` | Markdown | Human-readable summary + recommendations |
-| `--cbom` | **CycloneDX 1.6 CBOM** | Cryptography Bill of Materials, flows into SBOM / compliance tooling; each asset carries its NIST post-quantum security level |
+| `--cbom` | **CycloneDX 1.6 CBOM** | Cryptography Bill of Materials, flows into SBOM / compliance tooling; algorithm assets carry their NIST post-quantum security level, and key material, certificates and protocols are inventoried under their own CycloneDX asset type |
 | `--sarif` | **SARIF 2.1.0** | GitHub code scanning and any SARIF-aware CI, with `security-severity` per rule |
 | `--html` | Self-contained HTML | Offline interactive report: filter by severity / PQ status, search, drill into evidence and citations |
 | `--fail-on <sev>` | exit code | Exit `2` if any finding is at/above `critical\|high\|medium\|low\|info` |
@@ -117,7 +117,7 @@ Every finding also carries a `confidence` level (`confirmed` = parsed structure;
 
 `<target>` is one of:
 - A hostname or URL (`example.com`, `https://example.com:8443/whatever`), runs **TLS scanner only**.
-- A GitHub shorthand or URL (`owner/repo`, `https://github.com/owner/repo`), shallow-clones and runs **TLS (homepage) + source + deps**.
+- A GitHub shorthand or URL (`owner/repo`, `https://github.com/owner/repo`), shallow-clones and runs **source + deps**. Scan the project's deployed hostname separately for TLS posture.
 - A local directory, runs **source + deps**.
 
 | Option | Description | Default |

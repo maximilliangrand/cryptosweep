@@ -26,6 +26,8 @@ follow [Semantic Versioning](https://semver.org/).
   IETF reference.
 - **SSRF guard**: scan targets that resolve to loopback, RFC 1918, link-local,
   CGNAT, or cloud-metadata addresses are refused unless `--allow-private` is set.
+  Every IPv6 spelling of an address is normalized to its 16 bytes before
+  classification, including IPv4-mapped, IPv4-compatible, NAT64, and 6to4 forms.
 - **Resource ceilings** on the source walk (`maxFiles` / `maxTotalBytes`) with an
   explicit truncation finding, so a hostile or very large repository cannot exhaust
   memory and coverage limits are never silent.
@@ -45,6 +47,26 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Key and signature severity now grades classical strength, separately from the
+  post-quantum verdict.** A classically sound but pre-quantum key or signature
+  (RSA-2048+, P-256+, Ed25519, SHA-256 RSA) is `medium`; anything below the SP
+  800-131A floor, or signed with SHA-1/MD5, is `high`/`critical`. `pq_status` is
+  unchanged. Previously every recognized key type was `high`, which made
+  `--fail-on high` red for every host on the public internet and left RSA-1024
+  and RSA-4096 indistinguishable.
+- **Dependency findings are reconciled against confirmed source evidence.** When
+  the AST scanner has structurally confirmed that every JWT algorithm in a
+  codebase is HMAC, the JWT library's registry finding is downgraded instead of
+  asserting a quantum-vulnerable verdict the tool itself disproved at higher
+  confidence.
+- **Per-obligation attribution is derived, not constant.** Obligations declare
+  which failure modes (confidentiality / identity / classical strength) breach
+  them, and the harvest ledger counts only the assets that actually match.
+- **The MCP server no longer exposes `allowPrivate`,** and filesystem targets are
+  confined to `CRYPTOSWEEP_MCP_ROOT` (the working directory by default), so a
+  prompt-injected client cannot probe the internal network or walk the disk.
+  Messages are also dispatched independently, so a long scan no longer blocks
+  `ping` and notifications behind it.
 - **Certificate analysis is now deterministic.** Leaf keys are typed from a parsed
   `KeyObject` and signature algorithms from the certificate's real ASN.1 field, via
   a new minimal DER reader. Detection no longer guesses from substrings.
@@ -55,8 +77,38 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **SSRF bypass via non-dotted IPv4-mapped IPv6.** The guard matched only the
+  textual `::ffff:1.2.3.4` form, so `::ffff:7f00:1` (loopback) and
+  `::ffff:a9fe:a9fe` (the cloud-metadata endpoint) were allowed through, as were
+  `0:0:0:0:0:0:0:1` and `::0.0.0.0`. Addresses are now canonicalized to bytes
+  before classification, and an unparseable literal fails closed.
+- **MD5/MD2-signed certificates were the quietest finding in the report.** Their
+  OIDs were missing from the signature table, and an unrecognized OID was rated
+  `info`/`unknown`. MD2/MD4/MD5 are now `critical`, an unrecognized signature
+  algorithm is `medium` "needs review", and the table gained the SHA-224 variants
+  and all twelve SLH-DSA parameter sets.
+- **One unreadable or oversized file aborted the entire source scan** and
+  discarded every finding already collected. Size is now checked with `stat`
+  before the read (so a file above the cap is never buffered), and per-file I/O
+  failures degrade to an explicit coverage finding.
+- **Passphrase-encrypted PEM private keys were never detected.** The rule now
+  skips the RFC 1421 `Proc-Type:` / `DEK-Info:` header block before requiring a
+  base64 body.
+- **The certificate-chain finding fabricated its evidence**: it printed each
+  certificate's issuer instead of its subject, counted the locally-supplied trust
+  anchor as an intermediate, and asserted "using classical crypto" without ever
+  reading a key type. It now names the real intermediates' subjects and key types
+  and derives the verdict from them.
+- **The CBOM silently dropped every finding without an `algorithm`**, so hardcoded
+  private keys, the certificate chain, and the protocol finding never appeared in
+  the "Bill of Materials". They are now emitted with the appropriate CycloneDX
+  `assetType`.
+- **SARIF results for TLS findings carried no `locations`**, so GitHub code
+  scanning had nothing to anchor an alert to. Network findings now populate
+  `Location.host` / `Location.port` and emit a `tls://host:port` artifact plus a
+  logical location.
 - **EdDSA false negative**: an Ed25519 or Ed448 leaf certificate is now correctly
-  reported as quantum-vulnerable / high, not info / unknown.
+  reported as quantum-vulnerable, not info / unknown.
 - **SHA-1 signatures** are now identified and flagged distinctly (a classical break
   today, not only a quantum one). The prior detection branch never fired.
 - Elided PEM snippets in READMEs no longer trigger a false "hardcoded private key"

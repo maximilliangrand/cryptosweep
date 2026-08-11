@@ -11,9 +11,24 @@
 import { REFS } from "../crypto";
 import type { Reference } from "../report";
 
+/**
+ * What kind of cryptographic failure an obligation actually binds.
+ *
+ * This is the ontology edge that makes per-obligation attribution real rather
+ * than decorative: without it every obligation reports the same total, which
+ * looks derived and is not.
+ *
+ * - `confidentiality`, data recorded today and decrypted later (harvest-now).
+ * - `identity`, signatures and identity keys forgeable once a CRQC exists.
+ * - `classical-strength`, primitives already broken without a quantum computer.
+ */
+export type ObligationScope = "confidentiality" | "identity" | "classical-strength";
+
 export interface Obligation {
   id: string;
   label: string;
+  /** The failure modes this obligation is breached by. */
+  scopes: ObligationScope[];
   reference?: Reference;
 }
 
@@ -48,10 +63,21 @@ export interface EstateProfile {
 }
 
 const OBLIGATIONS = {
-  hndl: { id: "hndl", label: "Harvest-now-decrypt-later exposure", reference: REFS.ir8547 },
-  cnsa2: { id: "cnsa-2.0", label: "NSA CNSA 2.0 federal PQC mandate", reference: REFS.cnsa2 },
-  aba16c: { id: "aba-1.6c", label: "ABA Model Rule 1.6(c) duty of technological competence" },
-  hipaa: { id: "hipaa", label: "HIPAA Security Rule (multi-decade PHI retention)" },
+  // Purely a confidentiality exposure: signatures are not harvested.
+  hndl: { id: "hndl", label: "Harvest-now-decrypt-later exposure", scopes: ["confidentiality"], reference: REFS.ir8547 },
+  // CNSA 2.0 mandates PQ key establishment AND PQ signatures.
+  cnsa2: { id: "cnsa-2.0", label: "NSA CNSA 2.0 federal PQC mandate", scopes: ["confidentiality", "identity"], reference: REFS.cnsa2 },
+  // A competence duty is breached by shipping already-broken crypto too.
+  aba16c: {
+    id: "aba-1.6c",
+    label: "ABA Model Rule 1.6(c) duty of technological competence",
+    scopes: ["confidentiality", "classical-strength"],
+  },
+  hipaa: {
+    id: "hipaa",
+    label: "HIPAA Security Rule (multi-decade PHI retention)",
+    scopes: ["confidentiality", "classical-strength"],
+  },
 } as const satisfies Record<string, Obligation>;
 
 const GENERAL: DataClass = {

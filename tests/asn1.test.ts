@@ -15,6 +15,14 @@ describe("certificateSignatureOid", () => {
     expect(certificateSignatureOid(der("ec-p256"))).toBe("1.2.840.10045.4.3.2");
     expect(certificateSignatureOid(der("ed25519"))).toBe("1.3.101.112");
     expect(certificateSignatureOid(der("rsa-sha1"))).toBe("1.2.840.113549.1.1.5");
+    expect(certificateSignatureOid(der("rsa-md5"))).toBe("1.2.840.113549.1.1.4");
+  });
+
+  it("names the classically-broken digests instead of reporting them as unknown", () => {
+    // An unrecognized OID reads as "nothing to see here", which is the worst
+    // possible verdict on the worst algorithms in the corpus.
+    expect(signatureAlgorithmName(certificateSignatureOid(der("rsa-md5")))).toBe("md5WithRSAEncryption");
+    expect(signatureAlgorithmName("1.2.840.113549.1.1.2")).toBe("md2WithRSAEncryption");
   });
 
   it("does not confuse OIDs that merely appear inside the cert (parse, don't guess)", () => {
@@ -36,6 +44,9 @@ describe("signatureAlgorithmName", () => {
   it("maps known OIDs and passes through unknown ones as null", () => {
     expect(signatureAlgorithmName("1.3.101.112")).toBe("Ed25519");
     expect(signatureAlgorithmName("2.16.840.1.101.3.4.3.17")).toBe("ML-DSA-44");
+    // All twelve SLH-DSA parameter sets, not just the first.
+    expect(signatureAlgorithmName("2.16.840.1.101.3.4.3.26")).toBe("SLH-DSA-SHAKE-128s");
+    expect(signatureAlgorithmName("2.16.840.1.101.3.4.3.31")).toBe("SLH-DSA-SHAKE-256f");
     expect(signatureAlgorithmName("9.9.9.9")).toBeNull();
     expect(signatureAlgorithmName(null)).toBeNull();
   });

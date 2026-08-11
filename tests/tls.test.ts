@@ -14,6 +14,7 @@ function cert(overrides: Partial<CertInfo> = {}): CertInfo {
     subject: "www.example.com",
     issuer: "Example CA",
     isLeaf: true,
+    selfSigned: false,
     keyType: "rsa",
     keyBits: 2048,
     curve: null,
@@ -86,7 +87,7 @@ describe("analyzeTls", () => {
     expect(hybrid.severity).toBe("medium");
   });
 
-  it("classifies an Ed25519 leaf as quantum-vulnerable / high (EdDSA regression guard)", () => {
+  it("classifies an Ed25519 leaf as quantum-vulnerable (EdDSA regression guard)", () => {
     const info = parseCertificate(readCert("ed25519"), true);
     const result: TlsScanResult = {
       protocol: "TLSv1.3",
@@ -98,8 +99,58 @@ describe("analyzeTls", () => {
     const key = byId(findings, "CSW-TLS-001");
     expect(key.title).toContain("Ed25519");
     expect(key.pq_status).toBe("vulnerable");
-    expect(key.severity).toBe("high");
+    // Classically sound: a migration item (medium), not a live break.
+    expect(key.severity).toBe("medium");
     expect(key.confidence).toBe("confirmed");
+  });
+
+  it("grades classical key strength separately from the quantum verdict", () => {
+    const grade = (overrides: Partial<CertInfo>): Finding =>
+      byId(
+        analyzeTls(
+          { protocol: "TLSv1.3", cipherName: null, groupName: "X25519", chain: [cert(overrides)] },
+          "graded.example.com:443",
+          NOW,
+        ),
+        "CSW-TLS-001",
+      );
+
+    // Sound today, broken by a CRQC: a plan-ahead item, so a `--fail-on high`
+    // gate is not red for every certificate on the public internet.
+    expect(grade({ keyBits: 4096 }).severity).toBe("medium");
+    expect(grade({ keyType: "ec", curve: "P-256", keyBits: null }).severity).toBe("medium");
+    // Below the SP 800-131A floor: broken classically, today.
+    expect(grade({ keyBits: 1024 }).severity).toBe("high");
+    expect(grade({ keyBits: 512 }).severity).toBe("critical");
+    expect(grade({ keyType: "ec", curve: "P-192", keyBits: null }).severity).toBe("high");
+    // The quantum verdict is unchanged in every case.
+    expect(grade({ keyBits: 4096 }).pq_status).toBe("vulnerable");
+    expect(grade({ keyBits: 1024 }).recommendation).toMatch(/SP 800-131A/);
+  });
+
+  it("rates an MD5-signed certificate critical instead of burying it as info", () => {
+    const info = parseCertificate(readCert("rsa-md5"), true);
+    expect(info?.signatureAlgorithm).toBe("md5WithRSAEncryption");
+    const findings = analyzeTls(
+      { protocol: "TLSv1.3", cipherName: null, groupName: "X25519", chain: info ? [info] : [] },
+      "md5.example.com:443",
+      NOW,
+    );
+    const sig = byId(findings, "CSW-TLS-002");
+    expect(sig.severity).toBe("critical");
+    expect(sig.confidence).toBe("confirmed");
+    expect(sig.pq_status).toBe("vulnerable");
+  });
+
+  it("treats an unrecognized signature OID as a review item, not a clean bill of health", () => {
+    const findings = analyzeTls(
+      { protocol: "TLSv1.3", cipherName: null, groupName: "X25519", chain: [cert({ signatureAlgorithm: "unknown", signatureOid: "9.9.9.9" })] },
+      "odd.example.com:443",
+      NOW,
+    );
+    const sig = byId(findings, "CSW-TLS-002");
+    expect(sig.severity).toBe("medium");
+    expect(sig.confidence).toBe("low");
   });
 
   it("rates a SHA-1 signature high with a classical-break note (dead-branch regression guard)", () => {
@@ -180,6 +231,43 @@ describe("analyzeTls", () => {
   });
 });
 
+describe("certificate chain finding", () => {
+  const leaf = cert({ subject: "www.example.com", issuer: "WE1" });
+  const intermediate = cert({ isLeaf: false, subject: "WE1", issuer: "GTS Root R4", keyType: "ec", curve: "P-256", keyBits: null });
+  const root = cert({ isLeaf: false, subject: "GTS Root R4", issuer: "GTS Root R4", selfSigned: true });
+
+  function chainFinding(chain: CertInfo[]): Finding | undefined {
+    return analyzeTls({ protocol: "TLSv1.3", cipherName: null, groupName: "X25519", chain }, "www.example.com:443", NOW).find(
+      (f) => f.id === "CSW-TLS-003",
+    );
+  }
+
+  it("names the intermediates' subjects, not their issuers", () => {
+    const finding = chainFinding([leaf, intermediate, root]);
+    expect(finding?.evidence).toContain("WE1");
+    // The old evidence printed issuers, so the only real intermediate (WE1) was
+    // missing and the self-signed root's own name appeared twice.
+    expect(finding?.evidence).not.toContain("GTS Root R4");
+    expect(finding?.evidence).not.toMatch(/(GTS Root R4).*\1/);
+  });
+
+  it("excludes the self-signed trust anchor Node walks in from the local store", () => {
+    expect(chainFinding([leaf, intermediate, root])?.title).toContain("1 intermediate(s)");
+    // A leaf plus only a locally-supplied root is not a chain with intermediates.
+    expect(chainFinding([leaf, root])).toBeUndefined();
+  });
+
+  it("derives the classical verdict from the parsed intermediate key types", () => {
+    const parsed = chainFinding([leaf, intermediate]);
+    expect(parsed?.pq_status).toBe("vulnerable");
+    expect(parsed?.confidence).toBe("confirmed");
+
+    const opaque = chainFinding([leaf, cert({ isLeaf: false, subject: "Opaque CA", keyType: "unknown", keyBits: null })]);
+    expect(opaque?.pq_status).toBe("unknown");
+    expect(opaque?.confidence).toBe("high");
+  });
+});
+
 describe("scanTls", () => {
   it("uses the injected probe and stamps host:port evidence", async () => {
     const probe: TlsProbe = async (host, port) => {
@@ -195,5 +283,20 @@ describe("scanTls", () => {
     const findings = await scanTls("example.com", { probe });
     expect(findings.some((f) => f.evidence.includes("example.com:443"))).toBe(true);
     expect(byId(findings, "CSW-TLS-004").severity).toBe("medium");
+  });
+
+  it("stamps host/port on every network finding so SARIF can anchor them", async () => {
+    const probe: TlsProbe = async () => ({
+      protocol: "TLSv1.3",
+      cipherName: "TLS_AES_256_GCM_SHA384",
+      groupName: "X25519",
+      chain: [cert()],
+    });
+    const findings = await scanTls("example.com", { probe, port: 8443 });
+    expect(findings.length).toBeGreaterThan(0);
+    for (const finding of findings) {
+      expect(finding.location?.host, finding.id).toBe("example.com");
+      expect(finding.location?.port, finding.id).toBe(8443);
+    }
   });
 });

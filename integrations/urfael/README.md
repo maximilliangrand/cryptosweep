@@ -50,8 +50,17 @@ and passes its static scan clean.
   because it is your own audited code. Do not enable a plugin you would not run yourself.
 - Being unconfined is also what lets `scan` reach the filesystem (to read source and
   dependency manifests) and the network (TLS host posture, and the opt-in OSV CVE
-  lookup). cryptosweep enforces its own SSRF guard, so it refuses to connect to loopback
-  or private addresses unless explicitly told to.
+  lookup). Two guards narrow that on the MCP path, because an MCP server is reachable by
+  whatever text the brain has been fed:
+  - The SSRF guard cannot be switched off. The CLI's `--allow-private` has no MCP
+    equivalent, so loopback, RFC 1918, link-local, CGNAT and cloud-metadata addresses are
+    always refused.
+  - Filesystem targets must live under `CRYPTOSWEEP_MCP_ROOT`, which defaults to the
+    server's working directory. Set it to the tree you actually want scannable:
+    ```
+    "entry": { "transport": "stdio", "cmd": ["node", "/absolute/path/to/cryptosweep/dist/mcp.js"],
+               "env": { "CRYPTOSWEEP_MCP_ROOT": "/absolute/path/to/your/vault" } }
+    ```
 - When Urfael's host-capability tier (the cell + broker) lands, switch to a confined,
   least-privilege grant by adding a `capabilities` block to `plugin.json`, for example:
   ```json

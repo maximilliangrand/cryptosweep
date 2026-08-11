@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -74,6 +74,50 @@ describe("scanSource (fixture directory)", () => {
   });
 });
 
+describe("scanSource (resilience)", () => {
+  let root: string;
+
+  beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), "csw-src-resilience-"));
+    await writeFile(join(root, "auth.js"), AUTH_SOURCE, "utf8");
+    await writeFile(join(root, "id_rsa.pem"), FAKE_RSA_KEY, "utf8");
+    await writeFile(join(root, "locked.txt"), "unreadable", "utf8");
+    await chmod(join(root, "locked.txt"), 0o000);
+  });
+
+  afterAll(async () => {
+    await chmod(join(root, "locked.txt"), 0o600).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("keeps scanning past an unreadable file and reports the coverage gap", async () => {
+    const findings = await scanSource(root);
+    // The whole scan used to abort on the first EACCES, discarding every
+    // finding already collected.
+    expect(findings.some((f) => f.category === "source" && /md5/i.test(f.title))).toBe(true);
+    expect(findings.some((f) => f.category === "keys")).toBe(true);
+    const skipped = findings.find((f) => f.ruleId === "source/unreadable-path");
+    expect(skipped?.severity).toBe("info");
+    expect(skipped?.evidence).toContain("locked.txt");
+  });
+
+  it("skips a file above the cap on its stat size, never reading it into memory", async () => {
+    const huge = join(root, "huge.bin");
+    const handle = await open(huge, "w");
+    await handle.truncate(2_500_000_001); // sparse, occupies no blocks
+    await handle.close();
+    try {
+      // Node's readFile hard-fails above 2 GiB (ERR_FS_FILE_TOO_LARGE). The walk
+      // used to read first and compare sizes second, so one big file aborted the
+      // scan — the opposite of the memory ceiling it claims to enforce.
+      const findings = await scanSource(root);
+      expect(findings.some((f) => f.category === "source" && /md5/i.test(f.title))).toBe(true);
+    } finally {
+      await rm(huge, { force: true });
+    }
+  });
+});
+
 describe("scanContent (unit)", () => {
   it("returns no findings for modern crypto without JWTs", () => {
     const clean = 'crypto.createHash("sha256").update(x).digest("hex");\nconst aes = "aes-256-gcm";';
@@ -132,6 +176,24 @@ describe("scanContent (false-positive calibration)", () => {
     expect(none).toBeDefined();
     expect(none?.severity).not.toBe("critical");
     expect(none?.confidence).toBe("low");
+  });
+
+  it("flags a passphrase-encrypted PEM key carrying RFC 1421 headers", () => {
+    // `ssh-keygen` with a passphrase and `openssl genrsa -aes256` both emit
+    // this form, and it is committed precisely because the passphrase feels
+    // like protection. The header lines broke the old base64-only body match.
+    const encrypted = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "Proc-Type: 4,ENCRYPTED",
+      "DEK-Info: AES-256-CBC,0123456789ABCDEF0123456789ABCDEF",
+      "",
+      "MIIBOgIBAAJBAKbogusexamplecontentnotarealkeyAAAAAAAAAAAAAAAAAAAAAA",
+      "-----END RSA PRIVATE KEY-----",
+    ].join("\n");
+    const findings = scanContent("src/deploy_key.pem", encrypted);
+    const key = findings.find((f) => f.category === "keys");
+    expect(key?.severity).toBe("critical");
+    expect(key?.title).toMatch(/private key/i);
   });
 
   it("keeps full confidence and critical severity for a real key in source", () => {

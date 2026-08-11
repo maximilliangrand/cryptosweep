@@ -12,10 +12,10 @@ import type { DetailedPeerCertificate } from "node:tls";
 import { isIP } from "node:net";
 import { X509Certificate } from "node:crypto";
 import { certificateSignatureOid, signatureAlgorithmName } from "../asn1";
-import { REFS, curveFriendlyName, keyAlgorithmLabel, keyPosture } from "../crypto";
+import { REFS, curveFriendlyName, isClassicallyWeakKey, isQuantumVulnerableKey, keyAlgorithmLabel, keyPosture } from "../crypto";
 import type { KeyType } from "../crypto";
 import { assertTargetAllowed } from "../net-guard";
-import type { Confidence, Finding, PqStatus, Reference, Severity } from "../report";
+import type { Confidence, Finding, Location, PqStatus, Reference, Severity } from "../report";
 
 export type { KeyType } from "../crypto";
 
@@ -23,6 +23,8 @@ export interface CertInfo {
   subject: string;
   issuer: string;
   isLeaf: boolean;
+  /** Self-issued (subject === issuer), i.e. a trust anchor rather than an intermediate. */
+  selfSigned: boolean;
   keyType: KeyType;
   keyBits: number | null;
   curve: string | null;
@@ -124,6 +126,7 @@ export function parseCertificate(der: Buffer, isLeaf: boolean): CertInfo | null 
     subject: commonName(x509.subject),
     issuer: commonName(x509.issuer),
     isLeaf,
+    selfSigned: x509.subject === x509.issuer,
     keyType,
     keyBits,
     curve,
@@ -149,12 +152,16 @@ function signaturePosture(name: string): {
   recommendation: string;
 } {
   if (name === "unknown") {
+    // Fail closed: an unrecognized signature OID on a TLS leaf is a review item,
+    // not a clean bill of health. Rating it `info` let the worst algorithms in
+    // the corpus through as the quietest finding in the report.
     return {
-      severity: "info",
+      severity: "medium",
       pq_status: "unknown",
       confidence: "low",
-      references: [],
-      recommendation: "Signature algorithm OID was not recognized, verify the certificate manually.",
+      references: [REFS.cwe327],
+      recommendation:
+        "Signature algorithm OID was not recognized; treat as unreviewed and identify the algorithm manually before trusting this chain.",
     };
   }
   if (/^ML-DSA|^SLH-DSA/i.test(name)) {
@@ -164,6 +171,16 @@ function signaturePosture(name: string): {
       confidence: "confirmed",
       references: [REFS.fips204, REFS.fips205],
       recommendation: "Post-quantum signature already in use, keep it and track CA/ecosystem interop.",
+    };
+  }
+  if (/^md[245]/i.test(name)) {
+    return {
+      severity: "critical",
+      pq_status: "vulnerable",
+      confidence: "confirmed",
+      references: [REFS.sp800131a, REFS.cwe327, REFS.fips204],
+      recommendation:
+        "MD2/MD4/MD5 signature: forgeable with a classical chosen-prefix collision today (a rogue CA certificate was forged this way in 2008, and Flame exploited it in 2012). Re-issue on SHA-256+ immediately; this is not a quantum-timeline item.",
     };
   }
   if (/sha1/i.test(name)) {
@@ -177,11 +194,47 @@ function signaturePosture(name: string): {
     };
   }
   return {
-    severity: "high",
+    // Classically sound but pre-quantum: a migration item, not a live break.
+    // Rating it `high` made `--fail-on high` red for every host on the internet.
+    severity: "medium",
     pq_status: "vulnerable",
     confidence: "confirmed",
     references: [REFS.fips204, REFS.cnsa2],
     recommendation: "Classical signature; move to ML-DSA / hybrid certificates when CA support arrives.",
+  };
+}
+
+/**
+ * Assess the certificates above the leaf.
+ *
+ * Two things must be right here or the finding is fiction. First, Node's
+ * `getPeerCertificate(true)` keeps walking `issuerCertificate` into the local
+ * trust store, so the last entry is usually a root the server never sent; roots
+ * are self-signed, so we drop them and count only real intermediates. Second,
+ * the verdict is read from each intermediate's parsed key type, not asserted.
+ */
+function evaluateChain(chain: CertInfo[]): Finding | null {
+  const intermediates = chain.slice(1).filter((c) => !c.selfSigned);
+  if (intermediates.length === 0) return null;
+
+  const classical = intermediates.filter((c) => isQuantumVulnerableKey(c.keyType));
+  const unparsed = intermediates.length - classical.length;
+  const posture =
+    unparsed === 0
+      ? "using classical crypto"
+      : `${classical.length} of ${intermediates.length} using classical crypto, ${unparsed} of unrecognized key type`;
+
+  return {
+    id: "CSW-TLS-003",
+    ruleId: "tls/chain-classical",
+    severity: "medium",
+    category: "tls",
+    title: `Certificate chain has ${intermediates.length} intermediate(s) ${posture}`,
+    evidence: intermediates.map((c) => `${c.subject} (${keyDescription(c)})`).join(" → "),
+    pq_status: classical.length > 0 ? "vulnerable" : "unknown",
+    confidence: unparsed === 0 ? "confirmed" : "high",
+    references: [REFS.fips204, REFS.cnsa2],
+    recommendation: "The whole chain must migrate; classical intermediates remain quantum-vulnerable.",
   };
 }
 
@@ -327,7 +380,12 @@ function evaluateHybridKex(result: TlsScanResult, evidence: string): Finding {
 }
 
 /** Analyze a completed handshake and return findings. Pure, drives the tests. */
-export function analyzeTls(result: TlsScanResult, target = "tls", now: Date = new Date()): Finding[] {
+export function analyzeTls(
+  result: TlsScanResult,
+  target = "tls",
+  now: Date = new Date(),
+  location?: Location,
+): Finding[] {
   const findings: Finding[] = [];
   const leaf = result.chain[0];
 
@@ -345,7 +403,8 @@ export function analyzeTls(result: TlsScanResult, target = "tls", now: Date = ne
     });
   } else {
     const subjectEvidence = `${target} (${leaf.subject})`;
-    const posture = keyPosture(leaf.keyType);
+    const posture = keyPosture(leaf.keyType, leaf.keyBits, leaf.curve);
+    const classicallyWeak = isClassicallyWeakKey(leaf.keyType, leaf.keyBits, leaf.curve);
     findings.push({
       id: "CSW-TLS-001",
       ruleId: "tls/leaf-public-key",
@@ -357,9 +416,10 @@ export function analyzeTls(result: TlsScanResult, target = "tls", now: Date = ne
       confidence: leaf.keyType === "unknown" ? "low" : "confirmed",
       algorithm: keyAlgorithmLabel(leaf.keyType, leaf.keyBits, leaf.curve),
       references: posture.references,
-      recommendation:
-        posture.pq_status === "vulnerable"
-          ? "Plan migration to a post-quantum / hybrid certificate (ML-DSA) as CA support arrives."
+      recommendation: classicallyWeak
+        ? "Below the SP 800-131A minimum (RSA/DSA ≥ 2048 bits, ECC ≥ 224-bit curve): this key is at risk from classical attack today. Re-key now, then plan the post-quantum migration."
+        : posture.pq_status === "vulnerable"
+          ? "Classically sound but pre-quantum. Plan migration to a post-quantum / hybrid certificate (ML-DSA) as CA support arrives."
           : "Confirm the key type and document it in the crypto inventory.",
     });
 
@@ -382,28 +442,16 @@ export function analyzeTls(result: TlsScanResult, target = "tls", now: Date = ne
     if (validity) findings.push(validity);
   }
 
-  if (result.chain.length > 1) {
-    findings.push({
-      id: "CSW-TLS-003",
-      ruleId: "tls/chain-classical",
-      severity: "medium",
-      category: "tls",
-      title: `Certificate chain has ${result.chain.length - 1} intermediate(s) using classical crypto`,
-      evidence: result.chain
-        .slice(1)
-        .map((c) => c.issuer)
-        .join(" → "),
-      pq_status: "vulnerable",
-      confidence: "high",
-      references: [REFS.fips204, REFS.cnsa2],
-      recommendation:
-        "The whole chain must migrate; classical intermediates remain quantum-vulnerable.",
-    });
-  }
+  const chainFinding = evaluateChain(result.chain);
+  if (chainFinding) findings.push(chainFinding);
 
   const protocolFinding = evaluateProtocol(result.protocol, target);
   if (protocolFinding) findings.push(protocolFinding);
   findings.push(evaluateHybridKex(result, target));
+
+  // Network findings have no file path; the host/port IS their location, and
+  // SARIF consumers drop results that carry none.
+  if (location) for (const finding of findings) finding.location = { ...location };
 
   return findings;
 }
@@ -540,5 +588,5 @@ export async function scanTls(host: string, options: TlsScanOptions = {}): Promi
   // Only guard the real network path; an injected probe is trusted (and offline).
   if (!options.probe) await assertTargetAllowed(host, options.allowPrivate);
   const result = await probe(host, port, timeoutMs);
-  return analyzeTls(result, `${host}:${port}`);
+  return analyzeTls(result, `${host}:${port}`, new Date(), { host, port });
 }

@@ -7,7 +7,7 @@
  * remote repo by URL.
  */
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -33,6 +33,17 @@ interface WalkBudget {
   files: number;
   bytes: number;
   truncated: boolean;
+  /** Paths the walk could not read; reported so a coverage gap is never silent. */
+  skipped: { count: number; names: string[] };
+}
+
+/** How many skipped paths are named in the coverage finding; the rest are counted only. */
+const MAX_SKIPPED_NAMED = 10;
+
+/** Record an unreadable path, keeping only a bounded sample of the names. */
+function recordSkipped(budget: WalkBudget, relPath: string): void {
+  budget.skipped.count += 1;
+  if (budget.skipped.names.length < MAX_SKIPPED_NAMED) budget.skipped.names.push(relPath);
 }
 
 const DEFAULT_MAX_FILES = 25_000;
@@ -61,9 +72,14 @@ const JWT_USAGE = /jsonwebtoken|\bjwt\s*\.\s*(?:sign|verify|decode)/i;
  * A private-key block is only flagged when it has a real base64 body between the
  * BEGIN/END markers. A bare header or a `...`-elided snippet (as in READMEs and
  * docs) does not match, that alone kills the most common false critical.
+ *
+ * The optional RFC 1421 header block (`Proc-Type: 4,ENCRYPTED` / `DEK-Info: …`)
+ * must be skipped explicitly: passphrase-protected keys are the most common
+ * committed-key form in the wild, precisely because developers believe the
+ * passphrase makes committing them safe.
  */
 const PRIVATE_KEY =
-  /-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY-----[\r\n]+[A-Za-z0-9+/=\r\n]{40,}-----END/g;
+  /-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY-----[\r\n]+(?:[A-Za-z][\w-]*:[^\r\n]*[\r\n]+)*[\r\n]*[A-Za-z0-9+/=\r\n]{40,}-----END/g;
 const PUBLIC_KEY = /-----BEGIN (?:RSA )?PUBLIC KEY-----/g;
 
 /**
@@ -244,34 +260,79 @@ function isProbablyBinary(buffer: Buffer): boolean {
   return sample.includes(0);
 }
 
+/**
+ * Read and scan one file.
+ *
+ * Size is checked with `stat` BEFORE the read, so an oversized file is never
+ * buffered into memory (which is the resource ceiling this scanner promises),
+ * and every I/O failure degrades to a recorded skip. One unreadable file in a
+ * repo — a `chmod 000` fixture, an odd mode in a CI checkout — used to abort the
+ * whole scan and discard every finding already collected.
+ */
+async function scanFile(
+  full: string,
+  relPath: string,
+  maxFileBytes: number,
+  ids: IdAllocator,
+  findings: Finding[],
+  budget: WalkBudget,
+): Promise<void> {
+  let size: number;
+  try {
+    size = (await stat(full)).size;
+  } catch {
+    recordSkipped(budget, relPath);
+    return;
+  }
+  if (size > maxFileBytes) return;
+
+  let buffer: Buffer;
+  try {
+    buffer = await readFile(full);
+  } catch {
+    recordSkipped(budget, relPath);
+    return;
+  }
+  if (buffer.byteLength > maxFileBytes || isProbablyBinary(buffer)) return;
+  budget.files -= 1;
+  budget.bytes -= buffer.byteLength;
+  findings.push(...scanContent(relPath, buffer.toString("utf8"), ids));
+}
+
 async function walk(
   rootDir: string,
+  currentDir: string,
   ignoreDirs: Set<string>,
   maxFileBytes: number,
   ids: IdAllocator,
   findings: Finding[],
   budget: WalkBudget,
 ): Promise<void> {
-  const entries = await readdir(rootDir, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(currentDir, { withFileTypes: true });
+  } catch {
+    recordSkipped(budget, relativeTo(rootDir, currentDir));
+    return;
+  }
   for (const entry of entries) {
     if (budget.files <= 0 || budget.bytes <= 0) {
       budget.truncated = true;
       return;
     }
     if (entry.isSymbolicLink()) continue;
-    const full = join(rootDir, entry.name);
+    const full = join(currentDir, entry.name);
     if (entry.isDirectory()) {
       if (ignoreDirs.has(entry.name)) continue;
-      await walk(full, ignoreDirs, maxFileBytes, ids, findings, budget);
+      await walk(rootDir, full, ignoreDirs, maxFileBytes, ids, findings, budget);
     } else if (entry.isFile()) {
-      const buffer = await readFile(full);
-      if (buffer.byteLength > maxFileBytes || isProbablyBinary(buffer)) continue;
-      budget.files -= 1;
-      budget.bytes -= buffer.byteLength;
-      const relPath = full.startsWith(rootDir) ? full.slice(rootDir.length).replace(/^[/\\]/, "") : full;
-      findings.push(...scanContent(relPath || entry.name, buffer.toString("utf8"), ids));
+      await scanFile(full, relativeTo(rootDir, full) || entry.name, maxFileBytes, ids, findings, budget);
     }
   }
+}
+
+function relativeTo(rootDir: string, full: string): string {
+  return full.startsWith(rootDir) ? full.slice(rootDir.length).replace(/^[/\\]/, "") : full;
 }
 
 /** Recursively scan a local directory for quantum-vulnerable crypto. */
@@ -283,8 +344,25 @@ export async function scanSource(rootDir: string, options: SourceScanOptions = {
     files: options.maxFiles ?? DEFAULT_MAX_FILES,
     bytes: options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES,
     truncated: false,
+    skipped: { count: 0, names: [] },
   };
-  await walk(rootDir, ignoreDirs, maxFileBytes, new IdAllocator(), findings, budget);
+  await walk(rootDir, rootDir, ignoreDirs, maxFileBytes, new IdAllocator(), findings, budget);
+  if (budget.skipped.count > 0) {
+    const named = budget.skipped.names.join(", ");
+    const more = budget.skipped.count - budget.skipped.names.length;
+    findings.push({
+      id: "CSW-COV-001",
+      ruleId: "source/unreadable-path",
+      severity: "info",
+      category: "source",
+      title: `${budget.skipped.count} path(s) could not be read, coverage is incomplete`,
+      evidence: more > 0 ? `${named}, and ${more} more` : named,
+      pq_status: "unknown",
+      confidence: "confirmed",
+      recommendation:
+        "Grant the scanning user read access to these paths (or exclude them deliberately) so they are not a silent gap in the inventory.",
+    });
+  }
   if (budget.truncated) {
     findings.push({
       id: "CSW-SRC-000",
