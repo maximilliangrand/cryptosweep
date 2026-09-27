@@ -2,7 +2,7 @@
 
 **Post-quantum cryptography migration scanner for SaaS companies whose customer data has a multi-decade confidentiality horizon.**
 
-Scans your public surface, your repos, and your dependencies to produce a board-readable PQ-readiness report, with NIST-aligned remediation for every finding.
+Scans your public surface, your repos, and your dependencies to produce a CBOM, a SARIF file and an HTML report, with NIST-aligned remediation for every finding.
 
 ---
 
@@ -239,25 +239,6 @@ The CLI and the Worker are independent. You can use one without the other.
 
 ---
 
-## Manual fulfillment workflow (v0.1)
-
-The hosted landing page (`web/`) captures scan requests into Cloudflare D1 and pings Discord on each new entry. Fulfillment is deliberately manual at v0.1, you stay in the loop on every report sent out, no auto-pipeline.
-
-1. Discord ping arrives from the Worker with the requester's email + target.
-2. Generate the report:
-   ```bash
-   node dist/cli.js scan <target> --out /tmp/<id>.json
-   ```
-3. Email it:
-   ```bash
-   node dist/cli.js email --report /tmp/<id>.json --to <email>
-   ```
-4. Done, recipient receives the report via Resend within seconds.
-
-Full deploy runbook for the Worker (Cloudflare auth, D1, KV, secrets, deploy) lives at [`docs/DEPLOY.md`](docs/DEPLOY.md).
-
----
-
 ## Environment variables
 
 | Var | Where | Description |
@@ -271,15 +252,13 @@ Full deploy runbook for the Worker (Cloudflare auth, D1, KV, secrets, deploy) li
 
 ## Roadmap
 
-**v0.1 (shipped)**, CLI + TLS scanner + source scanner + deps scanner + email send + landing page + Discord webhook + manual fulfillment workflow.
+**v0.1 (shipped)**, CLI + TLS scanner + source scanner + deps scanner + email send + example request form.
 
 **Correctness & interoperability (shipped)**, deterministic certificate typing via `KeyObject` + ASN.1 (EdDSA/DSA/RSA-PSS included), SHA-1 signatures called out distinctly, active hybrid-KEX capability probe, per-finding confidence + NIST citations, context-calibrated source scanning (no false criticals on docs/tests), and **CycloneDX 1.6 CBOM + SARIF 2.1.0 + interactive HTML outputs + a `--fail-on` CI gate**.
 
 **v0.2 (planned)**, version-aware dependency matching against advisory data (consume the registry's `version_range`), KMS/HSM posture detection, AST-based source analysis to replace the regex first-pass.
 
 **v0.3**, Auto-generated migration PRs (hybrid wrap + dep upgrades), continuous monitoring (scan on every PR open), Slack alerts in addition to Discord.
-
-**v1.0**, Hosted SaaS tier: continuous PQ-readiness scanning across your GitHub org + a Cloudflare account scan, dashboard, billing.
 
 ---
 
@@ -301,4 +280,4 @@ MIT, see [`LICENSE`](LICENSE).
 
 ## Author
 
-Built by [maximilliangrand](https://github.com/maximilliangrand). For commercial PQ-readiness consulting engagements, reach out via the cryptosweep landing page.
+Built by [maximilliangrand](https://github.com/maximilliangrand). MIT licensed; a developer tool, not offered as a commercial service.
