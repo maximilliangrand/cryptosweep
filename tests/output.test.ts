@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildReport, failsThreshold } from "../src/report";
+import { buildReport, failsThreshold, sanitizeText, toMarkdown } from "../src/report";
 import type { Finding } from "../src/report";
 import { toCbom, describeAlgorithm } from "../src/output/cbom";
 import { toSarif } from "../src/output/sarif";
+import { scanContent } from "../src/scanners/source";
 
 const AT = new Date("2026-01-01T00:00:00.000Z");
 
@@ -154,6 +155,18 @@ describe("toSarif", () => {
   });
 });
 
+const RULE_FIXTURE = [
+  'import crypto from "node:crypto";',
+  'import jwt from "jsonwebtoken";',
+  'crypto.createHash("md5"); crypto.createHash("sha1");',
+  'crypto.createCipheriv("des-ede3-cbc", k, iv); crypto.createCipheriv("rc4", k, iv);',
+  'jwt.sign(p, k, { algorithm: "RS256" }); jwt.verify(t, k, { algorithms: ["HS256"] });',
+  "const key = `-----BEGIN RSA PRIVATE KEY-----",
+  "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun",
+  "-----END RSA PRIVATE KEY-----`;",
+  "const pub = `-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqh\n-----END PUBLIC KEY-----`;",
+].join("\n");
+
 describe("failsThreshold", () => {
   it("fires when a finding meets or exceeds the threshold", () => {
     const report = buildReport("example.com", FINDINGS, AT);
@@ -168,5 +181,84 @@ describe("failsThreshold", () => {
     const report = buildReport("example.com", low, AT);
     expect(failsThreshold(report, "high")).toBe(false);
     expect(failsThreshold(report, "low")).toBe(true);
+  });
+});
+
+describe("report rule ids", () => {
+  it("derives distinct rule ids per kind when a scanner sets none", () => {
+    const report = buildReport("repo", scanContent("src/app.ts", RULE_FIXTURE), AT);
+    const ids = report.findings.map((f) => f.ruleId);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).not.toContain("source/csw-src");
+    expect(ids).toContain("source/md5");
+    expect(ids).toContain("jwt/rs256");
+  });
+});
+
+/** True if the text holds a terminal-control or bidi-override character (newline and tab allowed). */
+function hasUnsafeCharacter(text: string): boolean {
+  return [...text].some((char) => {
+    const code = char.codePointAt(0) ?? 0;
+    const control = (code < 0x20 && code !== 0x09 && code !== 0x0a) || (code >= 0x7f && code <= 0x9f);
+    return control || (code >= 0x202a && code <= 0x202e);
+  });
+}
+
+describe("untrusted strings in terminal and Markdown output", () => {
+  const hostile: Finding = {
+    id: "CSW-KEY-001",
+    ruleId: "keys/private-key",
+    severity: "critical",
+    category: "keys",
+    title: "Hardcoded private key block",
+    evidence: "repo/\u001b]0;PWNED\u0007\u001b[31mRED\u001b[0m | fake | [x](https://evil.example) <img src=x>.key:1",
+    pq_status: "vulnerable",
+    recommendation: "Rotate\u202e it.",
+  };
+
+  it("escapes control characters and bidi overrides visibly and idempotently", () => {
+    expect(sanitizeText("a\u001b[31mb\u0007c\td\u202ee")).toBe("a\\x1b[31mb\\x07c\td\\u202ee");
+    expect(sanitizeText(sanitizeText("x\u009by"))).toBe(sanitizeText("x\u009by"));
+    expect(sanitizeText("plain text, unchanged")).toBe("plain text, unchanged");
+  });
+
+  it("never lets an escape sequence or Markdown/HTML syntax from a file name through", () => {
+    const markdown = toMarkdown(buildReport("repo\u001b[2J", [hostile], AT));
+    expect(hasUnsafeCharacter(markdown)).toBe(false);
+    expect(markdown).toContain("\\\\x1b");
+    expect(markdown).not.toContain("[x](https://evil.example)");
+    expect(markdown).toContain("\\[x\\](https://evil.example)");
+    expect(markdown).not.toMatch(/(?<!\\)<img/);
+    expect(markdown).toContain("\\<img");
+    // The pipe cannot open a new table cell.
+    const row = markdown.split("\n").find((line) => line.includes("Hardcoded private key block")) ?? "";
+    expect(row.split(/(?<!\\)\|/).length).toBe(8);
+  });
+
+  it("sanitizes finding strings at the report boundary for every consumer", () => {
+    const [finding] = buildReport("repo", [hostile], AT).findings;
+    expect(hasUnsafeCharacter(finding?.evidence ?? "")).toBe(false);
+    expect(finding?.recommendation).toBe("Rotate\\u202e it.");
+  });
+});
+
+describe("empty results", () => {
+  it("scopes the empty message to the checks that ran", () => {
+    const markdown = toMarkdown(buildReport("clean.example.com", [], AT));
+    expect(markdown).not.toMatch(/No quantum-vulnerable primitives detected/);
+    expect(markdown).toContain("No findings from the checks that ran.");
+    expect(markdown).toMatch(/does not record which checks ran/);
+  });
+
+  it("lists recorded coverage and flags partial coverage", () => {
+    const report = buildReport("repo", [], AT, [
+      { check: "source", scope: "412 files", complete: false, note: "2 files over 2 MB skipped" },
+      { check: "deps", scope: "3 manifests", complete: true },
+    ]);
+    const markdown = toMarkdown(report);
+    expect(markdown).toContain("No findings from the checks that ran.");
+    expect(markdown).toMatch(/Coverage was partial/);
+    expect(markdown).toContain("- source: 412 files (partial: 2 files over 2 MB skipped)");
+    expect(markdown).toContain("- deps: 3 manifests (complete)");
   });
 });
