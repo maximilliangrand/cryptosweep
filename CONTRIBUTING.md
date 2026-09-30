@@ -73,5 +73,8 @@ Every entry must:
 ## Reporting a security issue
 
 The scanner ingests untrusted input (arbitrary hosts, repositories, and, through
-the MCP server, tool arguments written by a model). If you find a way to make it reach an internal address, execute code, or
-exhaust resources, please open a private report rather than a public issue.
+the MCP server, tool arguments written by a model). If you find a way to make it
+reach an internal address, execute code, or exhaust resources, please report it
+to the maintainer privately (contact details are on the
+[maintainer's GitHub profile](https://github.com/maximilliangrand)) rather than
+in a public issue.
