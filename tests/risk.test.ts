@@ -251,6 +251,12 @@ describe("present-day breaks are act-now, never on the quantum clock", () => {
     expect(risk.ledger.actNowAssets).toBe(2);
   });
 
+  it("labels a committed private key as key material even when its algorithm is known", () => {
+    const risk = assessRisk("repo", [finding({ category: "keys", ruleId: "keys/private-key", algorithm: "RSA-2048" })], defaultProfile(TODAY));
+    expect(risk.assets[0]?.label).toBe("Committed private key material (RSA-2048)");
+    expect(risk.assets[0]?.verdict.status).toBe("act-now");
+  });
+
   it("never labels an embedded public key as a private key", () => {
     const report = buildReport("repo", scanContent("src/auth.ts", SOURCE));
     const risk = assessRisk("repo", report.findings, defaultProfile(TODAY));

@@ -382,8 +382,10 @@ function assetKey(f: Finding & { ruleId: string }): string {
 }
 
 function assetLabel(f: Finding & { ruleId: string }, usage: readonly CryptoUsage[]): string {
+  if (usage.includes("secret-material")) {
+    return f.algorithm ? `Committed private key material (${f.algorithm})` : "Committed private key material";
+  }
   if (f.algorithm) return f.algorithm;
-  if (usage.includes("secret-material")) return "Committed private key material";
   const entry = f.category === "deps" ? entryForRuleId(f.ruleId) : undefined;
   if (entry) return `${entry.name} (${entry.ecosystem})`;
   return f.title;
