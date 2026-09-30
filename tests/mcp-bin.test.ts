@@ -146,6 +146,13 @@ describe("bin build configuration", () => {
     for (const config of bins) expect(config.format).toEqual(["esm"]);
   });
 
+  it("leaves sourcemaps out of the published files", () => {
+    const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
+      files: string[];
+    };
+    expect(pkg.files).toEqual(["dist", "!dist/**/*.map"]);
+  });
+
   it("points package.json bins at the ESM builds", () => {
     const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
       bin: Record<string, string>;
