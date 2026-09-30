@@ -85,10 +85,12 @@ const OBLIGATIONS = {
     scopes: ["confidentiality", "identity"],
     reference: REFS.cnsa2,
   },
-  // A competence duty is breached by shipping already-broken crypto too.
+  // Rule 1.6(c) requires reasonable efforts to prevent unauthorized disclosure
+  // of client information; shipping already-broken crypto falls short of it too.
+  // (The technology-competence duty is Rule 1.1, Comment 8.)
   aba16c: {
     id: "aba-1.6c",
-    label: "ABA Model Rule 1.6(c) duty of technological competence",
+    label: "ABA Model Rule 1.6(c) reasonable efforts to safeguard client information",
     scopes: ["confidentiality", "classical-strength"],
   },
   hipaa: {

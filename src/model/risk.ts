@@ -477,7 +477,7 @@ const BREACHING_STATUSES: ReadonlySet<MoscaStatus> = new Set<MoscaStatus>(["expo
 /**
  * Does this asset put the estate in breach of this obligation?
  *
- * Attribution is by failure mode: an ABA 1.6(c) competence duty is breached by
+ * Attribution is by failure mode: the ABA 1.6(c) safeguarding duty is breached by
  * a confidentiality exposure or by already-broken crypto, while the HNDL
  * obligation is breached only by the former. Counting every off-track asset
  * against every obligation produced one constant dressed as an attribution.

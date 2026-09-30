@@ -121,6 +121,8 @@ describe("per-obligation attribution", () => {
 
     const hndl = rows.find((r) => /Harvest-now/.test(r.obligation));
     const aba = rows.find((r) => /ABA Model Rule/.test(r.obligation));
+    // 1.6(c) is the duty to safeguard client information; technology competence is Rule 1.1, Comment 8.
+    expect(aba?.obligation).toBe("ABA Model Rule 1.6(c) reasonable efforts to safeguard client information");
     // HNDL is breached by the exposed key exchange only.
     expect(hndl?.assets).toBe(1);
     // The competence duty additionally covers already-broken crypto (MD5).
