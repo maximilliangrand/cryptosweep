@@ -1,283 +1,368 @@
 # cryptosweep
 
-**Post-quantum cryptography migration scanner for SaaS companies whose customer data has a multi-decade confidentiality horizon.**
+An open-source developer tool for inventorying the cryptography a system uses and planning its post-quantum migration.
 
-Scans your public surface, your repos, and your dependencies to produce a CBOM, a SARIF file and an HTML report, with NIST-aligned remediation for every finding.
+cryptosweep scans TLS endpoints, source code and dependency manifests, records each cryptographic primitive it finds, and flags the ones a cryptographically relevant quantum computer would break (RSA, ECDSA, EdDSA, DSA, classical Diffie-Hellman) alongside the ones that are already broken today (MD5, SHA-1 signatures, DES, RC4, undersized keys, committed private keys). It writes JSON, Markdown, a CycloneDX 1.6 CBOM, SARIF 2.1.0 and a self-contained HTML report, and it can run as a CI gate or as an MCP server.
 
----
+It is a scanner, not a cryptography library: it implements no primitives and changes nothing it scans. Every finding says how it was derived (`confidence`), and the report records what each check covered, so a short result is never presented as proof that nothing else is there.
 
-## TL;DR
+## Contents
 
-`cryptosweep` answers a question every CISO will be asked in 2027-2030:
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Targets](#targets)
+- [What each scanner covers](#what-each-scanner-covers)
+- [The post-quantum key-exchange probe](#the-post-quantum-key-exchange-probe)
+- [Risk engine](#risk-engine)
+- [Outputs](#outputs)
+- [CI gate and exit codes](#ci-gate-and-exit-codes)
+- [MCP server](#mcp-server)
+- [Network behaviour](#network-behaviour)
+- [CLI reference](#cli-reference)
+- [Library use](#library-use)
+- [Limitations](#limitations)
+- [Development](#development)
 
-> *"Are we ready for the post-quantum migration?"*
+## Install
 
-It inventories the cryptographic primitives a system actually uses (TLS certificates, source-code crypto patterns, dependency manifests) and flags the ones a cryptographically-relevant quantum computer would break (RSA, ECDSA, EdDSA, classical key exchange) so engineering teams can plan a migration to hybrid / ML-KEM / ML-DSA before they have to.
-
-Detection is designed to be defensible, not heuristic where it counts: certificate keys are typed from a parsed `KeyObject`, signature algorithms from the certificate's actual ASN.1 field, and hybrid post-quantum key exchange (X25519MLKEM768) is confirmed by an active capability probe. Every finding carries a confidence level and a NIST/standards citation.
-
-Runs as a Node CLI. Outputs JSON, Markdown, a **CycloneDX 1.6 CBOM**, **SARIF 2.1.0** (for CI / code scanning), and a **self-contained interactive HTML report**. A `--fail-on <severity>` gate makes it a CI check. Optional email delivery via Resend, and an optional hosted landing page (Cloudflare Worker) for capturing scan requests.
-
----
-
-## Why this matters now
-
-Three independent timelines are converging:
-
-1. **NIST has standardized post-quantum primitives.** FIPS 203 (ML-KEM / Kyber), FIPS 204 (ML-DSA / Dilithium), and FIPS 205 (SLH-DSA / SPHINCS+) are final. There is no excuse left to ship only RSA / ECDSA in new systems.
-2. **CNSA 2.0** mandates US federal systems migrate to PQC by ~2030-2035. Every Fortune 500 with federal contracts inherits that deadline. Banks, insurers, hospitals follow.
-3. **"Harvest now, decrypt later"** attacks are real and already happening. Adversaries copy encrypted traffic *today* and decrypt it *when quantum computers arrive*. Any data with > 10-year confidentiality value (legal records, medical histories, M&A deals, IP filings) is already exposed.
-
-Most SaaS today still ships RSA-2048 + ECDSA-P256 as TLS defaults. That posture is fine in 2026 and broken by 2035. Cryptosweep finds those primitives so they can be migrated on a deliberate schedule rather than during an emergency.
-
----
-
-## Who this is for
-
-**Primary ICP: mid-market legal SaaS** (Clio, Filevine, Smokeball, MyCase, PracticePanther tier; 50-500 employees).
-
-Legal data is uniquely exposed to harvest-now-decrypt-later because:
-- **30+ year confidentiality horizon**: privileged communications, divorces, criminal records, M&A deal rooms, IP.
-- **ABA Model Rule 1.6(c)** imposes a *duty of technological competence*, including reasonable efforts to prevent unauthorized disclosure of client confidences.
-- **Federal court systems** (PACER-NG) are moving to PQ-ready crypto; vendors will be required to follow.
-
-**Secondary fits:**
-- **Healthtech SaaS**: HIPAA + multi-decade record retention.
-- **Fintech infrastructure**: PCI + emerging FFIEC PQ guidance.
-- **Defense subcontractors**: directly bound by CNSA 2.0.
-- **Anyone with long-lived encrypted backups**: encrypted-at-rest with classical KEKs is the obvious harvest target.
-
-If your customer's data still matters in 2040, you are the user.
-
----
-
-## What it scans
-
-| Surface | Scanner | Examples |
-|---|---|---|
-| **Public TLS** | `tls` | Cert chain, leaf key type/size (from a parsed `KeyObject`), signature algorithm (from the ASN.1 field), and active hybrid-KEX (`X25519MLKEM768`) support probing |
-| **Source code** | `source` | Weak `node:crypto` usage (MD5 / SHA-1 / DES / 3DES / RC4), `jsonwebtoken` algorithms, hardcoded RSA/EC private keys, embedded PEM public keys |
-| **Dependencies** | `deps` | `package.json` / `pnpm-lock.yaml`, `requirements.txt` / `pyproject.toml`, `Cargo.toml`, flagged against an internal registry of PQ-vulnerable libs with NIST-aligned alternatives |
-
-The `source` and `deps` scanners run together against a local directory or a shallow-cloned GitHub repo; `tls` runs against a hostname, since a repository has no endpoint of its own to handshake with.
-
-Every dependency finding carries at least one provenance reference (the standard or advisory that justifies flagging it). The JS/TS source scanner parses the code with an AST rather than grepping, so a weak-crypto call in a comment or an unrelated string is not a false positive, and an import-resolved call is reported at `confirmed` confidence.
-
-### Advisory cross-reference (opt-in)
-
-`--advisories` adds a *separate* dimension to dependency findings: known CVE advisories, looked up on [OSV.dev](https://osv.dev). It is off by default and is the only network path in the tool. When enabled it makes a single POST to `api.osv.dev/v1/querybatch` for the dependencies that are both already flagged and concretely version-pinned (a range or unpinned version is skipped, since attaching a CVE to a version you may not have installed would be a guess). It never changes a finding's severity or post-quantum status; it only appends references and one `Known advisories (not PQ):` line. Any network error fails closed to the exact offline result. Note that enabling it discloses the flagged package names and versions to a third-party service.
-
----
-
-## Quick start
-
-Requires Node ≥ 20 and pnpm.
+cryptosweep is not published to a package registry. Build it from source; it needs Node.js 22 or later and pnpm.
 
 ```bash
 git clone https://github.com/maximilliangrand/cryptosweep.git
 cd cryptosweep
-pnpm install
+pnpm install --frozen-lockfile
 pnpm build
-
-# TLS-only scan of a hostname
-node dist/cli.js scan https://www.example.com
-
-# Full scan of a GitHub repo (source + deps)
-node dist/cli.js scan facebook/react
-
-# Local directory, every output format at once
-node dist/cli.js scan ./my-project \
-  --out report.json --md report.md \
-  --cbom cbom.json --sarif results.sarif --html report.html
-
-# CI gate: exit non-zero if anything is high or worse
-node dist/cli.js scan ./my-project --sarif results.sarif --fail-on high
+node dist/cli.js --help
 ```
 
-Output goes to stdout as Markdown by default, or to any combination of the output flags below.
+The build produces two executables, `dist/cli.js` (`cryptosweep`) and `dist/mcp.js` (`cryptosweep-mcp`), plus the library in `dist/index.js` and `dist/index.cjs`. The only runtime dependency is `cac`; the JavaScript parser and the HTML viewer are bundled at build time.
 
-## Outputs & interoperability
+The TLS scanner's post-quantum probe also needs the Node.js build to use OpenSSL 3.5 or later, the first release with ML-KEM TLS groups. Check with `node -p process.versions.openssl`; the official Node.js 22.23.3 and 26.10.0 builds ship OpenSSL 3.5.8. On an older OpenSSL the rest of the TLS scan still runs, and the report says the key exchange could not be tested.
 
-| Flag | Format | Use |
-|---|---|---|
-| `--out` | JSON | The full report, machine-readable |
-| `--md` | Markdown | Human-readable summary + recommendations |
-| `--cbom` | **CycloneDX 1.6 CBOM** | Cryptography Bill of Materials, flows into SBOM / compliance tooling; algorithm assets carry their NIST post-quantum security level, and key material, certificates and protocols are inventoried under their own CycloneDX asset type |
-| `--sarif` | **SARIF 2.1.0** | GitHub code scanning and any SARIF-aware CI, with `security-severity` per rule |
-| `--html` | Self-contained HTML | Offline interactive report: filter by severity / PQ status, search, drill into evidence and citations |
-| `--fail-on <sev>` | exit code | Exit `2` if any finding is at/above `critical\|high\|medium\|low\|info` |
-
-Every finding also carries a `confidence` level (`confirmed` = parsed structure; `low` = a context-sensitive heuristic) so downstream consumers can triage.
-
----
-
-## CLI reference
-
-### `scan <target>`
-
-`<target>` is one of:
-- A hostname or URL (`example.com`, `https://example.com:8443/whatever`), runs **TLS scanner only**.
-- A GitHub shorthand or URL (`owner/repo`, `https://github.com/owner/repo`), shallow-clones and runs **source + deps**. Scan the project's deployed hostname separately for TLS posture.
-- A local directory, runs **source + deps**.
-
-| Option | Description | Default |
-|---|---|---|
-| `--out <file>` | Write JSON report | (none) |
-| `--md <file>` | Write Markdown report | (none) |
-| `--cbom <file>` | Write a CycloneDX 1.6 CBOM | (none) |
-| `--sarif <file>` | Write a SARIF 2.1.0 log | (none) |
-| `--html <file>` | Write a self-contained interactive HTML report | (none) |
-| `--fail-on <severity>` | Exit non-zero if any finding is at/above this severity | (off) |
-| `--allow-private` | Allow scanning non-public addresses (localhost, RFC 1918) | (off) |
-| `--advisories` | Cross-reference flagged deps against OSV.dev for known CVEs (network) | (off) |
-| `--port <port>` | TLS port | 443 (or as in URL) |
-| `--timeout <ms>` | TLS handshake timeout | 10000 |
-
-### `email`
-
-Send a previously-generated JSON report via [Resend](https://resend.com). HTML + plain-text bodies are rendered locally; no SDK dependency.
+## Quick start
 
 ```bash
-cryptosweep email --report /tmp/report.json --to lead@example.com
+# A local directory: source code and dependency manifests
+node dist/cli.js scan ./my-service
+
+# A public GitHub repository (shallow clone, then the same scans)
+node dist/cli.js scan owner/repo
+
+# A TLS endpoint
+node dist/cli.js scan example.com
+
+# Every output format at once, with the risk model for 10-year data
+node dist/cli.js scan ./my-service --data-class financial-pii \
+  --out report.json --md report.md --cbom cbom.json \
+  --sarif results.sarif --html report.html --risk risk.json
+
+# CI: fail (exit 2) when anything is high or worse
+node dist/cli.js scan . --sarif results.sarif --fail-on high
 ```
 
-| Option | Description |
-|---|---|
-| `--report <file>` | Path to a JSON report (from `scan --out`) |
-| `--to <email>` | Recipient |
-| `--from <email>` | Sender (defaults to `$SCAN_FROM_EMAIL` or `scan@cryptosweep.com`) |
-| `--subject <s>` | Override subject |
+Without an output flag the Markdown report goes to stdout. The risk summary always goes to stderr, so stdout stays clean for piping.
 
-Requires `RESEND_API_KEY`. The `--from` domain must be verified in your Resend dashboard.
-
-### `version` · `help`
-
-Standard.
-
----
-
-## Sample output
-
-Real scan of `www.filevine.com` (default Markdown output):
+An abridged run on a small sample project (a `package.json` with `jsonwebtoken` and `node-forge`, and one TypeScript file that signs an RS256 token, runs ECDH on P-256 and computes an ETag with SHA-1); long titles are cut at `...`:
 
 ```text
-# cryptosweep report
+| Severity  | Category | PQ status  | Confidence | Finding                                                  | Evidence                        |
+| 🟧 high   | jwt      | vulnerable | confirmed  | JWT RSA signature algorithm via jsonwebtoken (RS256)     | src/auth.ts:5                   |
+| 🟧 high   | deps     | vulnerable | medium     | jsonwebtoken (npm): Widely used JWT (JWS) library; ...   | package.json:jsonwebtoken@9.0.2 |
+| 🟨 medium | source   | vulnerable | confirmed  | ECDH key agreement via node:crypto (P-256)               | src/auth.ts:9                   |
+| 🟨 medium | deps     | vulnerable | medium     | node-forge (npm): Legacy crypto toolkit ...              | package.json:node-forge@1.3.1   |
+| 🟦 low    | source   | unknown    | high       | Weak hash in a non-security role via node:crypto (sha1)  | src/auth.ts:15                  |
 
-- Target:     https://www.filevine.com
-- Findings:   5 (critical: 0, high: 2, medium: 1, low: 0, info: 2)
-
-| Severity  | PQ status    | Confidence | Finding                                                          |
-| --------- | ------------ | ---------- | ---------------------------------------------------------------- |
-| 🟧 high   | vulnerable   | confirmed  | Leaf public key: ECDSA P-256                                     |
-| 🟧 high   | vulnerable   | confirmed  | Leaf signature algorithm: ecdsaWithSHA256                       |
-| 🟨 medium | vulnerable   | high       | Certificate chain has 3 intermediate(s) using classical crypto   |
-| ⬜ info   | transitional | confirmed  | Negotiated TLSv1.3                                               |
-| ⬜ info   | transitional | confirmed  | Server supports hybrid post-quantum key exchange (X25519MLKEM768)|
+crypto-agility risk (data class Financial / PII, 10yr horizon, CRQC assumed 2035):
+  exposed(HNDL) 2  overdue 0  act-now(classical) 0  on-track 2  |  16 risk-years exposed
 ```
 
-Note the last row: cryptosweep actively confirmed the server *will* negotiate
-X25519MLKEM768, the session key exchange already resists harvest-now-decrypt-later,
-even though the certificate itself is still classical. That distinction is the
-whole point of a per-primitive inventory.
+The ECDH call and `node-forge` (key establishment and encryption) are harvest-now-decrypt-later exposures for data that must stay secret for 10 years; the RS256 signature and `jsonwebtoken` are on the forge-later clock; the SHA-1 ETag protects nothing that depends on collision resistance, so it stays off the board. The Markdown report also lists every recommendation and a coverage section.
 
-JSON output schema:
+## Targets
 
-```jsonc
+`scan <target>` decides what the target is in a fixed order, so an ambiguous string is never guessed at:
+
+1. An explicit path (`./x`, `../x`, `/x`, `~`, `~/x`, `C:\x`) is always local. A missing directory is an error, never a GitHub lookup.
+2. An existing directory is scanned in place.
+3. A URL or git remote: `https://github.com/owner/repo` is cloned; any other `https://` URL is a TLS target (`https://host:8443/path` scans `host:8443`). `git@host:path`, `ssh://` and other `.git` remotes are clone targets, refused unless `--allow-any-git-host` is given.
+4. An IPv6 literal, bare or bracketed (`[2001:db8::1]:443`), is a TLS target.
+5. `owner/repo` (valid GitHub owner and repository names) is cloned from GitHub.
+6. Anything else is `host[:port]` for a TLS scan. `a.b/c` is the host `a.b`, not a repository.
+
+A directory or repository gets the source and dependency scans; a host gets the TLS scan. A repository has no endpoint of its own, so scan its deployed hostname separately for TLS posture.
+
+## What each scanner covers
+
+### Source scanner
+
+Every detector is a row in a rule table (`src/scanners/source-rules.ts`) with a stable rule id, the primitive it inventories, how that primitive is used, and the highest confidence a match can earn. Findings carry that rule id, which SARIF, the CBOM and the risk engine use.
+
+**JavaScript and TypeScript** (`.js .jsx .mjs .cjs .ts .tsx .mts .cts`) are parsed to an AST with `@babel/parser`, so a match in a comment or an unrelated string does not fire. Callees are resolved through imports and `require()` (aliased, destructured, dynamic `import()`, const aliases, member chains, optional chaining, TypeScript wrappers, transpiled output), with lexical scoping. A call resolved to its module earns `confirmed`; an unresolved call whose method name is unique to `node:crypto` (for example `createHash`) is still reported, at `high`. The APIs covered:
+
+| API | Calls |
+| --- | --- |
+| `node:crypto` | `generateKeyPair(Sync)` (RSA, DSA, EC, Ed25519/Ed448, X25519/X448, DH), `createSign`/`createVerify`, `sign`/`verify`, `createECDH`, `createDiffieHellman(Group)`, `getDiffieHellman`, `diffieHellman`, `publicEncrypt`/`privateDecrypt`, `privateEncrypt`/`publicDecrypt`, `createHash`/`hash` (MD5, SHA-1), `createCipheriv`/`createDecipheriv` and the legacy `createCipher` (DES, 3DES, RC2, RC4), `createHmac`/`hkdf`/`pbkdf2` over MD5 or SHA-1 |
+| WebCrypto (`crypto.subtle`) | `generateKey`, `importKey`, `unwrapKey`, `sign`/`verify`, `deriveKey`/`deriveBits`, `encrypt`/`decrypt`, `wrapKey` for RSA, ECDSA, ECDH, Ed25519/Ed448, X25519/X448 and RSA-OAEP |
+| `jsonwebtoken` | `sign`/`verify`, including its implicit HS256 default and algorithms chosen at runtime |
+| `jose` | JWS and JWE builders (`setProtectedHeader`), `*Verify`, `*Decrypt`, key import and generation, `UnsecuredJWT` |
+
+A JavaScript file that does not parse (or is over 1 MB) falls back to the lower-confidence regex sweep, and the report says so.
+
+**Python, Go and JVM languages** are matched with linear-time regular expressions over the file with its comments blanked out, at `medium` confidence at most:
+
+| Language | Libraries |
+| --- | --- |
+| Python (`.py .pyw .pyi`) | pyca/cryptography (RSA, EC, DSA, Ed25519/Ed448, DH, X25519/X448, ECDH, ECDSA, RSA padding, RSA-OAEP), PyCryptodome (RSA, ECC, DSA, OAEP, PKCS#1 signatures, DSS, weak hashes and ciphers), `hashlib` (MD5, SHA-1; `usedforsecurity=False` is honoured), PyJWT and python-jose |
+| Go (`.go`) | `crypto/rsa`, `crypto/ecdsa`, `crypto/ecdh`, `crypto/elliptic`, `crypto/dsa`, `crypto/ed25519`, `golang.org/x/crypto/curve25519`, `crypto/md5`, `crypto/sha1`, `crypto/des`, `crypto/rc4` |
+| Java, Kotlin, Scala, Groovy | JCA `KeyPairGenerator`, `Signature`, `KeyAgreement`, `Cipher` and `MessageDigest` with classical or weak algorithm names |
+
+Other text files get the JavaScript regex sweep. Dependency manifests and lockfiles are left to the dependency scanner.
+
+**PEM key blocks** are looked for in every file, in every language. A private key block (`RSA`, `EC`, `DSA`, `OPENSSH`, `ENCRYPTED`, PKCS#8 or PGP) is `critical`. A public key is parsed: a classical key is graded by type and size (RSA-1024 is `high`, below the SP 800-131A floor), an ML-DSA, SLH-DSA or ML-KEM key is reported as post-quantum, and a block that does not parse is reported at lower confidence (as RSA if its label says so, otherwise as an unknown algorithm).
+
+Severity grades classical strength and `pq_status` carries the quantum verdict. A sound RSA-2048 key generation is `medium` and quantum-vulnerable; a 1024-bit modulus, a curve under 224 bits, or a signature over MD5 or SHA-1 is raised to `high` or `critical`. For MD5 and SHA-1 digests the surrounding code sets the rating: a password, token or signature context is `high`, an ETag, cache key or git object id is `low` with `pq_status` unknown, and anything else is `medium`. Matches in documentation, tests, fixtures and examples (key blocks included) are de-rated two severity steps and marked `low` confidence.
+
+The walk skips `node_modules`, `.git`, `dist`, `build`, `coverage`, `.next`, `out`, `vendor` and `.turbo`, visits directories in sorted order, and does not follow symlinks. It stops at 25,000 files or 300 MB read, skips files over 2 MB and binary files (only their first 8 KB is read), and reports at most 500 findings per file. Each of those gaps, and every unreadable path, becomes an `info` coverage finding.
+
+### Dependency scanner
+
+The dependency scanner reads these files and matches the packages against a built-in registry of 31 cryptography libraries (10 npm, 10 PyPI, 11 crates.io), each with a cited reason, a post-quantum status, what the library is used for and which algorithms it provides:
+
+| Ecosystem | Files |
+| --- | --- |
+| npm | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock` (v1 and Berry) |
+| PyPI | requirements files (`requirements*.txt`, `*requirements*.in`, `constraints*.txt`, anything under `requirements/`), `pyproject.toml` (PEP 621 dependencies and optional dependencies, dependency groups, Poetry, PDM and uv tables), `poetry.lock`, `uv.lock`, `Pipfile`, `Pipfile.lock` |
+| crates.io | `Cargo.toml` (including target-specific, workspace and renamed dependencies), `Cargo.lock` |
+
+Python names are normalised per PEP 503. Matching is version-aware only where the registry records the release that added post-quantum support (`fixedIn`: `cryptography` 48.0.0 and `rustls` 0.23.22); a declared version at or above it is reported as transitional, and an unresolvable version is flagged conservatively at `low` confidence. Other dependency files (`go.mod`, `pom.xml`, Gradle, `Gemfile.lock`, `composer.lock`, `setup.py`, `bun.lock`, .NET, Swift, Dart, Elixir and C/C++ package files) are not parsed; they are listed in a coverage finding rather than silently ignored.
+
+One finding can be lowered by source evidence: a `jsonwebtoken` dependency declared directly in a `package.json`, when the source under that manifest has at least one import-resolved call site, every call site pins an HMAC algorithm, none is unsigned or chooses its algorithm at runtime, and the source scan had no coverage gap. The lowered finding cites the call sites. No other library is reconciled, and nothing is ever raised or cleared this way.
+
+`--advisories` adds known CVE advisories from [OSV.dev](https://osv.dev) to flagged, version-pinned dependencies. It is off by default, it sends the package names, versions and ecosystems to `api.osv.dev`, the notice is printed before anything is sent, and a lookup failure leaves the offline result unchanged. Advisories never change a finding's severity or post-quantum status.
+
+### TLS scanner
+
+For a host, the TLS scanner reports:
+
+- the leaf public key, typed from a parsed `KeyObject` (RSA, RSA-PSS, DSA, EC with its curve, Ed25519/Ed448, ML-DSA, SLH-DSA, ML-KEM), with the key's algorithm OID as a fallback when the local OpenSSL cannot decode a post-quantum key;
+- the leaf signature algorithm, read from the certificate's ASN.1 `signatureAlgorithm` field (RSASSA-PSS with its hash; SHA-1 is `high`, MD2/MD4/MD5 is `critical`, an unrecognised OID is `medium` for review);
+- every intermediate the server sent, judged on both its key and its signature, with SHA-1, MD5 or unrecognised intermediate signatures called out separately;
+- whether the chain validated against the local trust store and the host name, and whether the leaf has expired or expires within 30 days;
+- the negotiated protocol version (TLS 1.2 is quantum-vulnerable because ML-KEM groups exist only for TLS 1.3; TLS 1.0 and 1.1 are `high`), and the key exchange: static RSA key transport (no forward secrecy), DHE below 2048 bits, ECDHE with its curve, or a post-quantum group.
+
+A server that refuses the modern client offer at the TLS layer gets one retry with a legacy offer (TLS 1.0 and up, OpenSSL security level 0), so an obsolete server is reported instead of aborting the scan. Certificates are read with verification off, so an untrusted chain is still inventoried and its validation failure is its own finding.
+
+## The post-quantum key-exchange probe
+
+The primary handshake offers the groups a current browser leads with (X25519MLKEM768, then X25519) followed by every other standard group, so a server that only accepts a NIST-curve hybrid or pure ML-KEM still completes a handshake. Then each post-quantum group is offered on its own, over TLS 1.3 only:
+
+| Group | Kind | ML-KEM parameter set | Specification |
+| --- | --- | --- | --- |
+| X25519MLKEM768 | hybrid | ML-KEM-768 | RFC 10024 |
+| SecP256r1MLKEM768 | hybrid | ML-KEM-768 | RFC 10024 |
+| MLKEM768 | pure | ML-KEM-768 | draft-ietf-tls-mlkem |
+| SecP384r1MLKEM1024 | hybrid | ML-KEM-1024 | RFC 10024 |
+| MLKEM1024 | pure | ML-KEM-1024 | draft-ietf-tls-mlkem |
+
+A group counts as accepted only when the handshake completes as TLS 1.3 and either the runtime names that group as negotiated, or (on runtimes such as Node.js 22 that do not report TLS 1.3 groups) the offer contained only that group, which RFC 8446 requires the server to use. The second case is rated `high` rather than `confirmed`. A TLS 1.2 server can never pass: the probe will not complete below TLS 1.3, and a TLS 1.2 session is reported as classical key exchange whatever any probe says.
+
+The finding lists the groups the server accepted. If it accepted none, it lists the groups it refused (`high` confidence when all five were refused, `medium` otherwise). Groups the local OpenSSL lacks are marked untestable, and if none can be tested the result is an `info` limitation of the scanning machine, not a verdict on the server. Only ML-KEM-1024 groups are credited as the CNSA 2.0 key-establishment parameter set; ML-KEM-768 hybrids are labelled transitional and not CNSA 2.0 compliant, and pure ML-KEM is post-quantum safe.
+
+Support means that sessions with clients that offer these groups resist harvest-now-decrypt-later. It does not mean every session does: clients that do not offer them still get classical key exchange, and the certificate is judged separately.
+
+What one scan does not assess (the protocol finding states the first item): other protocol versions and cipher suites the server also accepts (only the ones negotiated for this client offer are observed), which group the server prefers when a client offers several, the symmetric strength CNSA 2.0 also requires (AES-256, SHA-384), certificates the server sent that Node's issuer walk drops, revocation, and anything above the TLS layer.
+
+## Risk engine
+
+The risk engine turns findings into a per-asset verdict with Mosca's inequality: if X (how long the data must stay secret) plus Y (how long the migration takes) is greater than Z (years until a cryptographically relevant quantum computer), data protected today is already exposed.
+
+Each asset (one per rule and algorithm) gets a threat model, decided from structured fields (the finding's usage, its rule id, the registry entry, then the algorithm label), never from titles:
+
+- **harvest-now**: key establishment and encryption. Recorded traffic or ciphertext can be decrypted later, so X applies. Status is `exposed` (X > Z), `overdue` (X + Y > Z) or `on-track`. Only these assets count toward the harvest ledger.
+- **forge-later**: signatures and authentication. There is nothing to harvest; the migration must finish before Z. Status is `overdue` (Y > Z), `on-track`, or `exposed` once the assumed CRQC year has passed.
+- **classical**: broken today, whatever the quantum timeline. A committed private key, JWT `alg: none`, MD2/MD4/MD5 and SHA-1 (including in signature names such as `md5WithRSAEncryption`), DES, 3DES, RC2, RC4, keys below the SP 800-131A minimum, and TLS below 1.2. Status is `act-now`.
+
+An asset whose use the evidence does not determine (a bare RSA key can sign or decrypt) is assessed under both models and gets the more urgent verdict; its rationale says so. A digest a scanner found in a non-security role is not flagged.
+
+Assumptions, all overridable, and printed with every risk model:
+
+- **Z**: the CRQC year defaults to 2035 (`--crqc-year`). This is an assumption, not a forecast: it is the planning date shared by US NSM-10, NIST IR 8547 (draft) and the UK NCSC migration timeline.
+- **Y**: migration takes 3 years for key establishment and 5 for signatures and PKI by default, following the UK NCSC 2025 timeline and the length of the SHA-1 certificate sunset. `--migration-years` applies one value to every asset.
+- **X**: set by the data class (`--data-class`); horizons are typical values, not legal advice.
+
+| Data class | Horizon (X) | Obligations counted |
+| --- | --- | --- |
+| `legal-privileged` | 30 years | ABA Model Rule 1.6(c) safeguarding duty, harvest-now exposure |
+| `medical-phi` | 25 years | HIPAA Security Rule, harvest-now exposure |
+| `government-cui` | 25 years | NSA CNSA 2.0 (binding on National Security Systems), harvest-now exposure |
+| `financial-pii` | 10 years | harvest-now exposure |
+| `secrets` | 5 years | harvest-now exposure |
+| `general` (default) | 7 years | harvest-now exposure |
+| `public` | 0 years | none |
+
+The ledger's headline number is the sum, over exposed harvest-now assets, of horizon years times the data class's sensitivity weight: a transparent ranking aid, not a monetary figure. `--risk <file>` writes the whole model (assets, verdicts with rationale, ledger, and a graph linking assets to the data class and obligations).
+
+## Outputs
+
+| Flag | Format | Contents |
+| --- | --- | --- |
+| (none) | Markdown on stdout | Findings table, recommendations, coverage |
+| `--out` | JSON | The full report: findings with rule id, severity, confidence, `pq_status`, algorithm, usage, references and location, plus coverage |
+| `--md` | Markdown | As stdout. Every field from the scanned target is escaped |
+| `--cbom` | CycloneDX 1.6 CBOM | Algorithm assets with CycloneDX primitive, OID (the one read from the certificate when there is one) and NIST quantum security level; certificates with subject, issuer and validity linked to their signature algorithm and public key; key material (committed private keys marked compromised); the negotiated protocol; flagged dependencies as library components with a purl, linked to the algorithms they provide |
+| `--sarif` | SARIF 2.1.0 | One rule per rule id with a stable description; every result carries its own level and `security-severity`; file locations are relative to `%SRCROOT%`, TLS findings are anchored at `tls://host:port` |
+| `--html` | HTML | A single offline file (React and Blueprint inlined, no network requests): risk summary, coverage, severity and status filters, search, evidence and citations |
+| `--risk` | JSON | The risk model described above |
+
+The test suite validates CBOM and SARIF documents generated from scanner output against the official JSON schemas (CycloneDX 1.6 and OASIS SARIF 2.1.0 errata 01), vendored unmodified under `tests/fixtures/schemas/`. Text that comes from the scanned target (file names, certificate subjects, manifest versions) has terminal-control and bidirectional-override characters made visible as escapes in the report, and replaced in MCP replies.
+
+## CI gate and exit codes
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | The scan completed (findings may exist) |
+| 1 | Invalid input or a failed scan (every option is validated before any network request or file write) |
+| 2 | `--fail-on <severity>` was given and at least one finding is at or above it |
+
+`--fail-on info` fails on any finding at all, including coverage notes. A GitHub Actions job that gates on `high` and uploads the SARIF to code scanning:
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+steps:
+  - uses: actions/checkout@v7
+  - uses: pnpm/action-setup@v6
+    with:
+      version: 12.6.0
+  - uses: actions/setup-node@v7
+    with:
+      node-version: 26
+  # Built outside the workspace, so the scan does not include cryptosweep's own test fixtures.
+  - name: Build cryptosweep
+    run: |
+      git clone --depth 1 https://github.com/maximilliangrand/cryptosweep "$RUNNER_TEMP/cryptosweep"
+      cd "$RUNNER_TEMP/cryptosweep" && pnpm install --frozen-lockfile && pnpm build
+  - run: node "$RUNNER_TEMP/cryptosweep/dist/cli.js" scan . --sarif results.sarif --fail-on high
+  - if: always() && hashFiles('results.sarif') != ''
+    uses: github/codeql-action/upload-sarif@v4
+    with:
+      sarif_file: results.sarif
+```
+
+The SARIF file is written before the gate is evaluated, so it is uploaded even when the job fails on findings.
+
+## MCP server
+
+`cryptosweep-mcp` (`dist/mcp.js`) is a Model Context Protocol server over stdio (JSON-RPC 2.0, protocol version 2024-11-05) with two tools:
+
+- `scan(target, dataClass?, crqcYear?, migrationYears?)`: the same scans and risk model as the CLI, returned as text (the first 12 findings, the risk summary and the coverage).
+- `data_classes()`: the data classes and their horizons.
+
+An MCP server acts on text a model has read, so tool arguments are never trusted with anything that widens what a scan can reach. That is decided only by the operator, through the server's launch environment:
+
+| Variable | Effect |
+| --- | --- |
+| `CRYPTOSWEEP_MCP_ROOT` | Directory filesystem targets must stay inside, compared after resolving symlinks, so a link inside the root cannot escape it. Relative targets resolve against it. If unset, the working directory is used, unless it is `/`, the home directory or an ancestor of it, in which case filesystem scans are refused |
+| `CRYPTOSWEEP_MCP_ALLOW_PRIVATE=1` | Let the SSRF guard pass non-public addresses (off by default) |
+| `CRYPTOSWEEP_MCP_ADVISORIES=1` | Send flagged, pinned dependencies to OSV.dev (off by default) |
+
+Clones from the MCP server are limited to public GitHub repositories; `--allow-any-git-host` has no MCP equivalent. Control, line-separator and bidirectional characters are replaced in everything sent to the model, including errors. At most 2 tool calls run at once and 8 wait; beyond that the server answers "busy". `notifications/cancelled` drops a queued call or aborts a running one (including its clone). When stdin closes, every accepted request is answered before the process exits.
+
+A client configuration:
+
+```json
 {
-  "target": "www.example.com",
-  "scanned_at": "2026-06-04T09:54:10.721Z",
-  "summary": { "findings": 5, "critical": 0, "high": 2, "medium": 2, "low": 0, "info": 1 },
-  "findings": [
-    {
-      "id": "CSW-TLS-001",
-      "severity": "high",
-      "category": "tls",
-      "title": "Leaf public key: RSA-2048",
-      "evidence": "www.example.com:443 (www.example.com)",
-      "pq_status": "vulnerable",
-      "recommendation": "Plan migration to a post-quantum / hybrid certificate (ML-DSA) as CA support arrives."
+  "mcpServers": {
+    "cryptosweep": {
+      "command": "node",
+      "args": ["/absolute/path/to/cryptosweep/dist/mcp.js"],
+      "env": { "CRYPTOSWEEP_MCP_ROOT": "/absolute/path/to/the/code/to/scan" }
     }
-  ]
+  }
 }
 ```
 
----
+`integrations/urfael/` packages the server as an [Urfael](https://github.com/maximilliangrand/urfael) plugin.
 
-## Repository layout
+## Network behaviour
+
+cryptosweep makes network connections only in these cases:
+
+- **TLS scan of a host.** The name is resolved once, every address is checked by the SSRF guard, and every connection goes to one of those vetted addresses (the original name is sent as SNI). A scan makes one handshake, one legacy retry if the server refuses the first at the TLS layer, and one handshake per ML-KEM group the local OpenSSL supports (up to five). No application data is sent.
+- **Clone of a GitHub repository.** Only `https://github.com/<owner>/<repo>` by default. `github.com` is resolved and vetted before a temporary directory exists, and git is pinned to that address. git runs without a shell, with credential helpers, hooks, symlinks, submodules, redirects and non-HTTPS protocols disabled, an allowlisted environment (`PATH`, proxy and CA variables), `--depth 1`, a 120 second deadline, a 512 MiB download cap and a 1 GiB / 250,000-file checkout cap. `--allow-any-git-host` (CLI only) allows other HTTPS and SSH remotes, still through the guard.
+- **`--advisories`**: one batched POST to `api.osv.dev` (see above).
+
+Scans of local directories make no network requests unless `--advisories` is given. There is no telemetry.
+
+The SSRF guard refuses loopback, private (RFC 1918), CGNAT, link-local and cloud-metadata, documentation, benchmarking, multicast, reserved and the other IANA special-purpose IPv4 ranges; for IPv6 it allows only global unicast, looks inside IPv4-mapped, IPv4-translated, NAT64 (`64:ff9b::/96`) and 6to4 addresses, and blocks the documentation and other special-purpose ranges. It fails closed: a name that does not resolve, a resolver answer that is not an IP address, and a numeric host written in any form other than a canonical dotted quad (`0177.0.0.1`, `0x7f.1`, `2130706433`) are refused. `--allow-private` (CLI) or `CRYPTOSWEEP_MCP_ALLOW_PRIVATE` (MCP) lifts the range check for local testing; the resolve-once pinning still applies.
+
+## CLI reference
 
 ```
-cryptosweep/
-├── src/
-│   ├── cli.ts                       # Node CLI entry (cac)
-│   ├── report.ts                    # Finding ontology (confidence, refs, location) + JSON/Markdown
-│   ├── crypto.ts                    # Cryptographic-primitive knowledge base + standards citations
-│   ├── asn1.ts                      # Minimal total DER reader (certificate signature OID)
-│   ├── scanners/
-│   │   ├── tls.ts                   # TLS scanner: KeyObject typing, ASN.1 sig, active hybrid probe
-│   │   ├── source.ts                # Source-code crypto scanner (context-calibrated regex)
-│   │   └── deps/
-│   │       ├── registry.ts          # PQ-vulnerable library registry (pure data)
-│   │       └── parsers/{npm,python,cargo}.ts
-│   ├── output/
-│   │   ├── cbom.ts                  # CycloneDX 1.6 Cryptography Bill of Materials
-│   │   ├── sarif.ts                 # SARIF 2.1.0 (CI / code scanning)
-│   │   └── viewer.ts                # Self-contained interactive HTML report
-│   └── email/
-│       ├── render.ts                # HTML + plain-text email rendering
-│       └── resend.ts                # Thin fetch wrapper around the Resend API
-├── tests/                           # vitest unit tests incl. real cert fixtures
-└── web/                             # Cloudflare Worker landing page + scan-request capture
-    ├── src/
-    │   ├── landing.html             # Marketing page + email-capture form
-    │   ├── api/scan-request.ts      # POST endpoint → D1 + Discord webhook
-    │   ├── lib/{rate-limit,validate,discord-webhook,ip-hash}.ts
-    │   └── storage/d1-schema.sql
-    └── tests/                       # vitest tests with @cloudflare/vitest-pool-workers
+cryptosweep scan <target> [options]
+cryptosweep version
+cryptosweep help
 ```
 
-The CLI and the Worker are independent. You can use one without the other.
+| Option | Description | Default |
+| --- | --- | --- |
+| `--out <file>` | Write the JSON report | |
+| `--md <file>` | Write the Markdown report | |
+| `--cbom <file>` | Write a CycloneDX 1.6 CBOM | |
+| `--sarif <file>` | Write a SARIF 2.1.0 log | |
+| `--html <file>` | Write the self-contained HTML report | |
+| `--risk <file>` | Write the risk model as JSON | |
+| `--fail-on <severity>` | Exit 2 if any finding is at or above `critical`, `high`, `medium`, `low` or `info` | off |
+| `--data-class <class>` | Data class for the risk model (see the table above) | `general` |
+| `--crqc-year <year>` | Assumed CRQC year, 2020 to 2100 | 2035 |
+| `--migration-years <years>` | One migration time for every asset, greater than 0 and at most 50 | 3 (key establishment), 5 (signatures) |
+| `--port <port>` | TLS port, 1 to 65535 (TLS targets only) | 443 or the port in the target |
+| `--timeout <ms>` | TLS handshake timeout, up to 600000 (TLS targets only) | 10000 |
+| `--allow-private` | Allow non-public addresses (localhost, RFC 1918) | off |
+| `--allow-any-git-host` | Allow clones from HTTPS hosts other than github.com and from SSH remotes | off |
+| `--advisories` | Look up known CVEs for flagged, pinned dependencies on OSV.dev (directory and repository targets only) | off |
 
----
+Two output flags may not name the same file.
 
-## Environment variables
+## Library use
 
-| Var | Where | Description |
-|---|---|---|
-| `RESEND_API_KEY` | CLI `email` | Required to actually send |
-| `SCAN_FROM_EMAIL` | CLI `email` | Optional; defaults to `scan@cryptosweep.com`. Must be a verified Resend sender. |
-| `DISCORD_WEBHOOK_URL` | Worker | Optional; Worker fires a webhook on each new scan request. Set in prod with `wrangler secret put`. |
-| `IP_HASH_SECRET` | Worker | Required; HMAC key used to hash request IPs before storing |
+The package can be used as a library from a local checkout (for example `pnpm add /path/to/cryptosweep` after building it):
 
----
+```ts
+import { assessRisk, buildReport, defaultProfile, scanTarget, toCbom, toSarif } from "cryptosweep";
 
-## Roadmap
+const findings = await scanTarget("./my-service");
+const report = buildReport("./my-service", findings);
+const risk = assessRisk(report.target, report.findings, defaultProfile(report.scanned_at, { dataClassId: "medical-phi" }));
+const cbom = toCbom(report);
+```
 
-**v0.1 (shipped)**, CLI + TLS scanner + source scanner + deps scanner + email send + example request form.
+The package exports the scanners (`scanTls`, `scanSource`, `scanDeps`, `scanContent`, `analyzeTls`), the orchestrator (`classifyTarget`, `scanTarget`), the SSRF guard (`resolveAllowedAddress`), the hardened clone (`cloneRepository`), the rule catalogue (`SOURCE_RULES`) and registry (`REGISTRY`), the risk engine and every output format, with TypeScript types.
 
-**Correctness & interoperability (shipped)**, deterministic certificate typing via `KeyObject` + ASN.1 (EdDSA/DSA/RSA-PSS included), SHA-1 signatures called out distinctly, active hybrid-KEX capability probe, per-finding confidence + NIST citations, context-calibrated source scanning (no false criticals on docs/tests), and **CycloneDX 1.6 CBOM + SARIF 2.1.0 + interactive HTML outputs + a `--fail-on` CI gate**.
+## Limitations
 
-**v0.2 (planned)**, version-aware dependency matching against advisory data (consume the registry's `version_range`), KMS/HSM posture detection, AST-based source analysis to replace the regex first-pass.
+- The source scanner finds the APIs listed above and nothing else. Other libraries, languages (C, C++, C#, Rust, Ruby, PHP, Swift), configuration files (OpenSSL, nginx, SSH), cryptography built from lower-level primitives, and keys held in KMS or HSMs are not seen. Regex matches in Python, Go and the JVM do not resolve imports or scopes.
+- The dependency registry covers 31 libraries. A library it does not list produces no finding, and a Go, Maven, Gradle, Ruby or PHP dependency is only reported as unparsed coverage.
+- Version-aware matching exists only for the two registry entries with a `fixedIn`; other entries are flagged at every version.
+- The TLS scan observes one client offer. It does not enumerate every protocol version and cipher suite a server accepts, does not check revocation, and says nothing about other services on the host.
+- The post-quantum probe needs OpenSSL 3.5 or later in the scanning Node.js build.
+- A GitHub clone fails if the local resolver cannot resolve `github.com` (for example on a proxy-only network), and a renamed repository does not clone, because redirects are disabled.
+- The risk model is a planning aid built on stated assumptions (the CRQC year, migration times, data horizons). It is not a prediction, a compliance determination or legal advice.
+- A cryptosweep report is an inventory to start from, not a substitute for a review by someone who knows the system and its cryptography.
 
-**v0.3**, Auto-generated migration PRs (hybrid wrap + dep upgrades), continuous monitoring (scan on every PR open), Slack alerts in addition to Discord.
+## Development
 
----
+```bash
+pnpm install --frozen-lockfile
+pnpm build       # regenerates src/output/viewer-shell.ts, then bundles with tsup
+pnpm typecheck
+pnpm lint
+pnpm test
+```
 
-## Status, scope, and trust
-
-`cryptosweep` is pre-1.0 software, and it tells you how sure it is. The TLS scanner parses certificates with Node's `crypto`/`tls` modules and a minimal ASN.1 reader, so key type, signature algorithm, and hybrid-KEX support are `confirmed`-confidence, not guessed. The source scanner is a regex first-pass (`medium`/`low` confidence, and de-rated in docs/tests to avoid false criticals); it will miss some constructs and is not a substitute for a hand audit (an AST engine is on the roadmap). The dependency registry is hand-curated and currently version-blind (version-range matching is on the roadmap); PRs adding libraries with citations are welcome.
-
-**This is not a cryptography implementation.** No new primitives. No new protocols. cryptosweep does not encrypt anything, it audits what other code does.
-
-For high-stakes use (regulatory filings, board-level commitments), pair a cryptosweep report with a manual security review from a credentialed cryptographer.
-
----
+CI runs these on Node.js 22 and 26 and fails if the build changes any committed file. See [CONTRIBUTING.md](CONTRIBUTING.md) for the layout, the registry rules and the test conventions, and [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 ## License
 
-MIT, see [`LICENSE`](LICENSE).
-
----
-
-## Author
-
-Built by [maximilliangrand](https://github.com/maximilliangrand). MIT licensed; a developer tool, not offered as a commercial service.
+MIT, see [LICENSE](LICENSE). Built by [maximilliangrand](https://github.com/maximilliangrand).
