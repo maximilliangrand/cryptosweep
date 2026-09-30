@@ -693,6 +693,7 @@ async function scanFile(full: string, relPath: string, state: WalkState): Promis
     state.filesOpened += 1;
     if (info.size > state.maxFileBytes) {
       record(state.oversized, relPath);
+      if (isJsTsFile(relPath)) record(state.fallback, relPath);
       return;
     }
     const sniff = Math.min(info.size, BINARY_SNIFF_BYTES);
@@ -772,7 +773,7 @@ function coverageFindings(state: WalkState, maxFiles: number, maxTotalBytes: num
   add(
     state.fallback,
     "source/ast-fallback",
-    `${n(state.fallback)} JavaScript/TypeScript file(s) did not parse and were analysed by the regex fallback`,
+    `${n(state.fallback)} JavaScript/TypeScript file(s) were not analysed by the AST (parse failure or size limit)`,
   );
   if (state.truncated) {
     out.push(

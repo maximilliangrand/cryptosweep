@@ -482,8 +482,8 @@ const CATALOGUE = {
     "Only the first matches in these files are reported. Review each file as a whole.",
   ),
   "source/ast-fallback": coverage(
-    "JavaScript/TypeScript files analysed by the regex fallback",
-    "These files did not parse (syntax the parser does not accept, or over the parse-size limit), so matches in them come from the lower-confidence regex sweep and comments are not excluded.",
+    "JavaScript/TypeScript files not analysed by the AST",
+    "Files that did not parse (syntax the parser does not accept, or over the parse-size limit) were matched by the lower-confidence regex sweep, which does not exclude comments or resolve imports; files over the per-file size limit were not read at all. Dependency findings are not reconciled against incomplete source evidence.",
   ),
 } satisfies Record<string, RuleSpec>;
 

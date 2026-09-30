@@ -30,6 +30,8 @@ describe("coverage gaps are explicit", () => {
     expect(tooLarge?.evidence).toBe("bundle.min.js");
     expect(tooLarge?.severity).toBe("info");
     expect(binary?.evidence).toBe("pad.bin");
+    // An unread JS bundle is also an AST gap, which keeps reconcile from trusting partial evidence.
+    expect(findings.find((f) => f.ruleId === "source/ast-fallback")?.evidence).toBe("bundle.min.js");
     expect(findings.every((f) => typeof f.ruleId === "string")).toBe(true);
   });
 
