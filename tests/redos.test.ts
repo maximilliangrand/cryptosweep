@@ -1,8 +1,10 @@
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 import { scanContent } from "../src/scanners/source";
-import { parsePnpmLock } from "../src/scanners/deps/parsers/npm";
-import { parseRequirementsTxt } from "../src/scanners/deps/parsers/python";
+import { parsePnpmLock, parseYarnLock } from "../src/scanners/deps/parsers/npm";
+import { parsePyproject, parseRequirementsTxt } from "../src/scanners/deps/parsers/python";
+import { parseCargoLock } from "../src/scanners/deps/parsers/cargo";
+import { parseToml } from "../src/scanners/deps/parsers/toml";
 
 /**
  * Catastrophic-backtracking regressions. Each input is adversarial but sized
@@ -95,5 +97,35 @@ describe("ReDoS: dependency manifests", () => {
     });
     expect(elapsed).toBeLessThan(BUDGET_MS);
     expect(deps.find((d) => d.name === "jsonwebtoken")?.version).toBe("9.0.2");
+  });
+});
+
+describe("ReDoS: TOML and yarn.lock readers", () => {
+  it("stays linear on unterminated and pathological TOML", () => {
+    for (const hostile of [
+      `a = "${"x".repeat(200_000)}`,
+      `a = """${"\\ \n".repeat(50_000)}`,
+      `a = '''${"x".repeat(200_000)}`,
+      `[${"a.".repeat(100_000)}`,
+      "[".repeat(200_000),
+      `v = ${"1".repeat(200_000)} x`,
+      `dependencies = [${'"a[b]", '.repeat(20_000)}`,
+    ]) {
+      expect(timed(() => parseToml(hostile)), hostile.slice(0, 20)).toBeLessThan(BUDGET_MS);
+    }
+  });
+
+  it("parses a large lockfile and a pyproject with thousands of entries linearly", () => {
+    const lock = '[[package]]\nname = "ring"\nversion = "0.16.20"\n\n'.repeat(20_000);
+    let packages = 0;
+    expect(timed(() => (packages = parseCargoLock(lock, "Cargo.lock").length))).toBeLessThan(BUDGET_MS);
+    expect(packages).toBe(1);
+    const pyproject = `[project]\ndependencies = [${Array.from({ length: 20_000 }, (_, i) => `"pkg${i}[x]>=1"`).join(", ")}]\n`;
+    expect(timed(() => parsePyproject(pyproject, "pyproject.toml"))).toBeLessThan(BUDGET_MS);
+  });
+
+  it("parses a yarn.lock with huge header and version lines linearly", () => {
+    const hostile = `${"a@1, ".repeat(40_000)}:\n  version ${" ".repeat(200_000)}x\n`;
+    expect(timed(() => parseYarnLock(hostile, "yarn.lock"))).toBeLessThan(BUDGET_MS);
   });
 });
