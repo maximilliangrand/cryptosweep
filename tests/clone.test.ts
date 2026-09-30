@@ -179,6 +179,25 @@ describe("parseCloneRemote", () => {
   });
 });
 
+describe("hardenedConfig", () => {
+  const pin = [{ address: "203.0.114.9", family: 4 as const }];
+  const v6 = [{ address: "2001:4860:4860::8888", family: 6 as const }];
+
+  it("pins a host name to its vetted addresses, bracketing IPv6", () => {
+    const remote = parseCloneRemote("https://git.example.com:8443/team/repo.git", true);
+    expect(hardenedConfig(remote, [...pin, ...v6])).toContain(
+      "http.curloptResolve=git.example.com:8443:203.0.114.9,[2001:4860:4860::8888]",
+    );
+  });
+
+  it("does not pin an IP-literal host, which has nothing to resolve", () => {
+    const remote = parseCloneRemote("https://[2001:4860:4860::8888]/team/repo.git", true);
+    expect(
+      hardenedConfig(remote, v6).some((setting) => setting.startsWith("http.curloptResolve")),
+    ).toBe(false);
+  });
+});
+
 describe("hardened git invocation (real git)", () => {
   const hasGit = spawnSync("git", ["--version"]).status === 0;
 

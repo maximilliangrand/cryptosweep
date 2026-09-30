@@ -20,6 +20,7 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { isIP } from "node:net";
 import { join } from "node:path";
 import { resolveAllowedAddress } from "./net-guard";
 import type { ResolvedAddress } from "./net-guard";
@@ -203,8 +204,9 @@ export function hardenedConfig(
     "core.fsmonitor=false",
     "submodule.recurse=false",
   ];
-  if (remote.transport === "https" && pinned.length > 0) {
-    const host = remote.host.replace(/^\[(.*)\]$/, "$1");
+  // An IP-literal host has nothing to resolve, so only names are pinned.
+  const host = remote.host.replace(/^\[(.*)\]$/, "$1");
+  if (remote.transport === "https" && pinned.length > 0 && isIP(host) === 0) {
     settings.push(
       `http.curloptResolve=${host}:${remote.port}:${pinned.map(curlAddress).join(",")}`,
     );
