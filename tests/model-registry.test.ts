@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { REGISTRY, depsRuleId, entryForRuleId, lookupEntry } from "../src/scanners/deps/registry";
 import { matchDeps } from "../src/scanners/deps";
+import { describeAlgorithm } from "../src/output/cbom";
 
 describe("registry facts", () => {
   it("dates rustls post-quantum support to 0.23.22, not 0.23.0", () => {
@@ -62,11 +63,12 @@ describe("registry facts", () => {
 });
 
 describe("registry structure", () => {
-  it("records usage and algorithms for every entry", () => {
+  it("records usage and CBOM-describable algorithms for every entry", () => {
     for (const entry of REGISTRY) {
       const where = `${entry.ecosystem}:${entry.name}`;
       expect(entry.usage.length, where).toBeGreaterThan(0);
       expect(entry.algorithms.length, where).toBeGreaterThan(0);
+      for (const label of entry.algorithms) expect(describeAlgorithm(label).primitive, `${where} ${label}`).not.toBe("unknown");
     }
   });
 
