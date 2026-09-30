@@ -227,7 +227,10 @@ describe("analyzeTls", () => {
     );
     expect(unsupported.pq_status).toBe("vulnerable");
     expect(unsupported.severity).toBe("medium");
-    expect(unsupported.confidence).toBe("confirmed");
+    // The aggregate verdict covers X25519MLKEM768 alone; one refused group is
+    // not proof that no post-quantum group is available.
+    expect(unsupported.confidence).toBe("medium");
+    expect(unsupported.title).toContain("tried: X25519MLKEM768");
   });
 });
 
@@ -262,9 +265,17 @@ describe("certificate chain finding", () => {
     expect(parsed?.pq_status).toBe("vulnerable");
     expect(parsed?.confidence).toBe("confirmed");
 
-    const opaque = chainFinding([leaf, cert({ isLeaf: false, subject: "Opaque CA", keyType: "unknown", keyBits: null })]);
+    const opaque = chainFinding([
+      leaf,
+      cert({ isLeaf: false, subject: "Opaque CA", keyType: "unknown", keyBits: null, signatureAlgorithm: "unknown" }),
+    ]);
     expect(opaque?.pq_status).toBe("unknown");
     expect(opaque?.confidence).toBe("high");
+
+    // An unrecognized key is still vouched for by a classical signature, which a
+    // quantum computer can forge, so the link is vulnerable, not unknown.
+    const opaqueKeyRsaSigned = chainFinding([leaf, cert({ isLeaf: false, subject: "Opaque CA", keyType: "unknown", keyBits: null })]);
+    expect(opaqueKeyRsaSigned?.pq_status).toBe("vulnerable");
   });
 });
 
