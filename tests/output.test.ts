@@ -3,6 +3,7 @@ import { buildReport, failsThreshold, sanitizeText, toMarkdown } from "../src/re
 import type { Finding } from "../src/report";
 import { toCbom, describeAlgorithm } from "../src/output/cbom";
 import { toSarif } from "../src/output/sarif";
+import { matchDeps } from "../src/scanners/deps";
 import { scanContent } from "../src/scanners/source";
 
 const AT = new Date("2026-01-01T00:00:00.000Z");
@@ -114,6 +115,100 @@ describe("toCbom", () => {
   });
 });
 
+const RULE_FIXTURE = [
+  'import crypto from "node:crypto";',
+  'import jwt from "jsonwebtoken";',
+  'crypto.createHash("md5"); crypto.createHash("sha1");',
+  'crypto.createCipheriv("des-ede3-cbc", k, iv); crypto.createCipheriv("rc4", k, iv);',
+  'jwt.sign(p, k, { algorithm: "RS256" }); jwt.verify(t, k, { algorithms: ["HS256"] });',
+  "const key = `-----BEGIN RSA PRIVATE KEY-----",
+  "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun",
+  "-----END RSA PRIVATE KEY-----`;",
+  "const pub = `-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqh\n-----END PUBLIC KEY-----`;",
+].join("\n");
+
+type SarifLog = {
+  runs: Array<{
+    tool: { driver: { informationUri: string; rules: Array<{ id: string; shortDescription: { text: string }; helpUri: string; properties: Record<string, unknown> }> } };
+    results: Array<{ ruleId: string; level: string; properties: Record<string, string>; locations?: Array<{ physicalLocation: { artifactLocation: { uri: string; uriBaseId?: string } } }> }>;
+  }>;
+};
+
+describe("toSarif rule identity (real scanner output)", () => {
+  const log = (): SarifLog => JSON.parse(toSarif(buildReport("repo", scanContent("src/app.ts", RULE_FIXTURE), AT))) as SarifLog;
+
+  it("gives MD5, SHA-1, DES and RC4, RS256 and HS256, and private and public keys their own rules", () => {
+    const run = log().runs[0];
+    const ruleOf = (predicate: (r: { properties: Record<string, string> }) => boolean): string | undefined =>
+      run?.results.find(predicate)?.ruleId;
+    const ids = run?.results.map((r) => r.ruleId) ?? [];
+    expect(new Set(ids).size).toBe(ids.length); // one result per rule in this fixture
+    expect(run?.tool.driver.rules).toHaveLength(ids.length);
+    expect(ruleOf((r) => r.properties.evidence === "src/app.ts:6")).not.toBe(ruleOf((r) => r.properties.evidence === "src/app.ts:9"));
+  });
+
+  it("builds rule metadata from the rule id alone, so result order cannot change it", () => {
+    const findings = scanContent("src/app.ts", RULE_FIXTURE);
+    const forward = JSON.parse(toSarif(buildReport("repo", findings, AT))) as SarifLog;
+    const backward = JSON.parse(toSarif(buildReport("repo", [...findings].reverse(), AT))) as SarifLog;
+    expect(backward.runs[0]?.tool.driver.rules).toEqual(forward.runs[0]?.tool.driver.rules);
+  });
+
+  it("does not score a low result by a critical sibling", () => {
+    const run = log().runs[0];
+    const hs = run?.results.find((r) => r.properties.severity === "low");
+    expect(hs?.level).toBe("note");
+    expect(hs?.properties["security-severity"]).toBe("3.0");
+    expect(run?.tool.driver.rules.find((rule) => rule.id === hs?.ruleId)?.properties["security-severity"]).toBe("3.0");
+  });
+
+  it("points tool and rule help at the current repository", () => {
+    const sarif = toSarif(buildReport("repo", scanContent("src/app.ts", RULE_FIXTURE), AT));
+    const run = (JSON.parse(sarif) as SarifLog).runs[0];
+    expect(run?.tool.driver.informationUri).toBe("https://github.com/maximilliangrand/cryptosweep");
+    expect(run?.tool.driver.rules.every((r) => r.helpUri.startsWith("https://github.com/maximilliangrand/cryptosweep"))).toBe(true);
+    expect(sarif).not.toMatch(/Grandillionaire/);
+  });
+
+  it("describes dependency rules from the registry", () => {
+    const findings = matchDeps([{ name: "tweetnacl", version: "1.0.3", ecosystem: "npm", manifestPath: "package.json" }]);
+    const rule = (JSON.parse(toSarif(buildReport("repo", findings, AT))) as SarifLog).runs[0]?.tool.driver.rules[0];
+    expect(rule?.id).toBe("deps/npm-tweetnacl");
+    expect(rule?.shortDescription.text).toMatch(/tweetnacl/);
+  });
+});
+
+describe("toSarif artifact locations", () => {
+  const uriOf = (path: string): { uri: string; uriBaseId?: string } | undefined => {
+    const finding: Finding = { ...(FINDINGS[1] as Finding), location: { path, line: 1 } };
+    const log = JSON.parse(toSarif(buildReport("repo", [finding], AT))) as SarifLog;
+    return log.runs[0]?.results[0]?.locations?.[0]?.physicalLocation.artifactLocation;
+  };
+
+  it("emits repository-relative URIs against %SRCROOT%", () => {
+    expect(uriOf("src/app.ts")).toEqual({ uri: "src/app.ts", uriBaseId: "%SRCROOT%" });
+    expect(uriOf("./src/app.ts")).toEqual({ uri: "src/app.ts", uriBaseId: "%SRCROOT%" });
+    expect(uriOf("src\\win\\app.ts")).toEqual({ uri: "src/win/app.ts", uriBaseId: "%SRCROOT%" });
+  });
+
+  it("percent-encodes characters that would break or redirect the URI", () => {
+    expect(uriOf("docs/My Notes #1?.md")?.uri).toBe("docs/My%20Notes%20%231%3F.md");
+    expect(uriOf("src/ünï.ts")?.uri).toBe("src/%C3%BCn%C3%AF.ts");
+    expect(uriOf("c:weird/file.ts")?.uri).toBe("c%3Aweird/file.ts");
+  });
+
+  it("does not pass an absolute path off as repository-relative", () => {
+    expect(uriOf("/tmp/checkout/src/app.ts")).toEqual({ uri: "file:///tmp/checkout/src/app.ts" });
+    expect(uriOf("C:\\repo\\app.ts")).toEqual({ uri: "file:///C:/repo/app.ts" });
+  });
+
+  it("brackets an IPv6 endpoint", () => {
+    const finding: Finding = { ...(FINDINGS[0] as Finding), location: { host: "2001:db8::1", port: 443 } };
+    const log = JSON.parse(toSarif(buildReport("repo", [finding], AT))) as SarifLog;
+    expect(log.runs[0]?.results[0]?.locations?.[0]?.physicalLocation.artifactLocation.uri).toBe("tls://[2001:db8::1]:443");
+  });
+});
+
 describe("toSarif", () => {
   it("emits a valid SARIF 2.1.0 log with rules, levels, and file locations", () => {
     const report = buildReport("example.com", FINDINGS, AT);
@@ -125,7 +220,7 @@ describe("toSarif", () => {
 
     const critical = run.results.find((r: { ruleId: string }) => r.ruleId === "keys/private-key");
     expect(critical.level).toBe("error");
-    expect(critical.locations[0].physicalLocation.artifactLocation.uri).toBe("src/secrets.ts");
+    expect(critical.locations[0].physicalLocation.artifactLocation).toEqual({ uri: "src/secrets.ts", uriBaseId: "%SRCROOT%" });
     expect(critical.locations[0].physicalLocation.region.startLine).toBe(12);
 
     const rule = run.tool.driver.rules.find((r: { id: string }) => r.id === "keys/private-key");
@@ -154,18 +249,6 @@ describe("toSarif", () => {
     });
   });
 });
-
-const RULE_FIXTURE = [
-  'import crypto from "node:crypto";',
-  'import jwt from "jsonwebtoken";',
-  'crypto.createHash("md5"); crypto.createHash("sha1");',
-  'crypto.createCipheriv("des-ede3-cbc", k, iv); crypto.createCipheriv("rc4", k, iv);',
-  'jwt.sign(p, k, { algorithm: "RS256" }); jwt.verify(t, k, { algorithms: ["HS256"] });',
-  "const key = `-----BEGIN RSA PRIVATE KEY-----",
-  "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun",
-  "-----END RSA PRIVATE KEY-----`;",
-  "const pub = `-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqh\n-----END PUBLIC KEY-----`;",
-].join("\n");
 
 describe("failsThreshold", () => {
   it("fires when a finding meets or exceeds the threshold", () => {
