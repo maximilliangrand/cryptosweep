@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderHtml, renderText } from "../../src/email/render";
 import { buildReport } from "../../src/report";
-import type { Finding } from "../../src/report";
+import type { Finding, Report } from "../../src/report";
 
 const FINDINGS: Finding[] = [
   {
@@ -73,10 +73,37 @@ describe("renderHtml", () => {
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
   });
 
-  it("renders a friendly empty state when there are no findings", () => {
+  it("scopes the empty state to the checks that ran instead of claiming an all-clear", () => {
     const empty = buildReport("clean.example.com", [], new Date("2026-05-30T12:00:00.000Z"));
     const html = renderHtml(empty);
-    expect(html).toContain("No quantum-vulnerable primitives detected.");
+    expect(html).not.toContain("No quantum-vulnerable primitives detected.");
+    expect(html).toContain("No findings from the checks that ran.");
+    expect(html).toMatch(/does not record which checks ran/);
+  });
+
+  it("lists recorded coverage in the empty state", () => {
+    const empty = buildReport("repo", [], new Date("2026-05-30T12:00:00.000Z"), [
+      { check: "deps", scope: "2 manifests <script>", complete: true },
+    ]);
+    const html = renderHtml(empty);
+    expect(html).toContain("<li>deps: 2 manifests &lt;script&gt; (complete)</li>");
+  });
+
+  it("escapes the summary counts of a tampered report", () => {
+    const tampered = {
+      ...REPORT,
+      summary: { ...REPORT.summary, findings: "<img src=x onerror=alert(document.domain)>", critical: '"><script>' },
+    } as unknown as Report;
+    const html = renderHtml(tampered);
+    expect(html).not.toContain("<img src=x");
+    expect(html).not.toContain('"><script>');
+    expect(html).toContain("Total findings: &lt;img src=x onerror=alert(document.domain)&gt;");
+  });
+
+  it("survives non-string fields in a tampered report", () => {
+    const tampered = { ...REPORT, findings: [{ ...FINDINGS[0]!, title: 42, evidence: null }] } as unknown as Report;
+    expect(() => renderHtml(tampered)).not.toThrow();
+    expect(renderHtml(tampered)).toContain("CSW-TLS-001, 42");
   });
 });
 
@@ -99,5 +126,23 @@ describe("renderText", () => {
 
   it("mentions NIST in the footer for every report", () => {
     expect(renderText(REPORT)).toContain("NIST");
+  });
+
+  it("makes control characters in untrusted fields visible", () => {
+    const tampered = {
+      ...REPORT,
+      target: "evil\u001b]0;owned\u0007",
+      findings: [{ ...FINDINGS[0]!, evidence: "a\u001b[2Jb" }],
+    } as unknown as Report;
+    const text = renderText(tampered);
+    expect(text.includes("\u001b") || text.includes("\u0007")).toBe(false);
+    expect(text).toContain("Target: evil\\x1b]0;owned\\x07");
+    expect(text).toContain("Evidence: a\\x1b[2Jb");
+  });
+
+  it("scopes the empty state in plain text too", () => {
+    const text = renderText(buildReport("clean.example.com", [], new Date("2026-05-30T12:00:00.000Z")));
+    expect(text).toContain("No findings from the checks that ran.");
+    expect(text).not.toContain("No quantum-vulnerable primitives detected.");
   });
 });
