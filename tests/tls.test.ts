@@ -262,9 +262,17 @@ describe("certificate chain finding", () => {
     expect(parsed?.pq_status).toBe("vulnerable");
     expect(parsed?.confidence).toBe("confirmed");
 
-    const opaque = chainFinding([leaf, cert({ isLeaf: false, subject: "Opaque CA", keyType: "unknown", keyBits: null })]);
+    const opaque = chainFinding([
+      leaf,
+      cert({ isLeaf: false, subject: "Opaque CA", keyType: "unknown", keyBits: null, signatureAlgorithm: "unknown" }),
+    ]);
     expect(opaque?.pq_status).toBe("unknown");
     expect(opaque?.confidence).toBe("high");
+
+    // An unrecognized key is still vouched for by a classical signature, which a
+    // quantum computer can forge, so the link is vulnerable, not unknown.
+    const opaqueKeyRsaSigned = chainFinding([leaf, cert({ isLeaf: false, subject: "Opaque CA", keyType: "unknown", keyBits: null })]);
+    expect(opaqueKeyRsaSigned?.pq_status).toBe("vulnerable");
   });
 });
 
