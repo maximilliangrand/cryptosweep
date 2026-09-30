@@ -101,7 +101,7 @@ describe("renderHtml", () => {
   });
 
   it("survives non-string fields in a tampered report", () => {
-    const tampered = { ...REPORT, findings: [{ ...FINDINGS[0]!, title: 42, evidence: null }] } as unknown as Report;
+    const tampered = { ...REPORT, findings: [{ ...FINDINGS[0], title: 42, evidence: null }] } as unknown as Report;
     expect(() => renderHtml(tampered)).not.toThrow();
     expect(renderHtml(tampered)).toContain("CSW-TLS-001, 42");
   });
@@ -132,7 +132,7 @@ describe("renderText", () => {
     const tampered = {
       ...REPORT,
       target: "evil\u001b]0;owned\u0007",
-      findings: [{ ...FINDINGS[0]!, evidence: "a\u001b[2Jb" }],
+      findings: [{ ...FINDINGS[0], evidence: "a\u001b[2Jb" }],
     } as unknown as Report;
     const text = renderText(tampered);
     expect(text.includes("\u001b") || text.includes("\u0007")).toBe(false);
