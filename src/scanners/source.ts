@@ -319,9 +319,31 @@ function keyHits(content: string, ast: ScanJsResult | null): RuleHit[] {
 // Regex languages
 // ---------------------------------------------------------------------------
 
-type SourceLanguage = "javascript" | RegexLanguage | "other";
+type SourceLanguage = "javascript" | RegexLanguage | "other" | "manifest";
+
+/**
+ * Dependency manifests and lockfiles belong to the dependency scanner. They
+ * name libraries (`"jsonwebtoken": ...`) next to arbitrary quoted strings, so
+ * the JavaScript regex sweep would read them as code; only key blocks are
+ * looked for in them.
+ */
+const DEPENDENCY_FILES: ReadonlySet<string> = new Set([
+  "package.json",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "bun.lock",
+  "Cargo.lock",
+  "poetry.lock",
+  "uv.lock",
+  "Pipfile.lock",
+  "composer.lock",
+  "Gemfile.lock",
+]);
 
 function languageOf(relPath: string): SourceLanguage {
+  if (DEPENDENCY_FILES.has(relPath.slice(relPath.lastIndexOf("/") + 1))) return "manifest";
   if (isJsTsFile(relPath)) return "javascript";
   const p = relPath.toLowerCase();
   if (/\.(?:py|pyw|pyi)$/.test(p)) return "python";
@@ -553,7 +575,7 @@ function analyzeContent(relPath: string, content: string, ids: IdAllocator): Con
     hits.push(...(fallback ? regexHits(content, "javascript") : ast.hits));
   } else if (language === "other") {
     hits.push(...regexHits(content, "javascript"));
-  } else {
+  } else if (language !== "manifest") {
     hits.push(...regexHits(stripComments(content, language), language));
   }
   hits.push(...keyHits(content, ast));

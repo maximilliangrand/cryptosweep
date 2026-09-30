@@ -100,6 +100,14 @@ describe("deterministic, repository-relative output", () => {
   });
 });
 
+describe("dependency manifests", () => {
+  it("are not read as code by the regex sweep, but are still checked for keys", () => {
+    const manifest = JSON.stringify({ dependencies: { jsonwebtoken: "9.0.2" }, config: { mode: "none", alg: "RS256" } });
+    expect(scanContent("package.json", manifest)).toEqual([]);
+    expect(scanContent("web/package.json", manifest + PRIVATE_KEY).map((f) => f.ruleId)).toEqual(["keys/private-key-block"]);
+  });
+});
+
 describe("PEM keys", () => {
   const pem = (key: KeyObject): string => key.export({ type: "spki", format: "pem" }).toString();
 
