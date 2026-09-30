@@ -144,10 +144,10 @@ describe("version-aware matching", () => {
   });
 
   it("downgrades a rustls install at/above fixedIn to transitional / info", () => {
-    const [f] = matchDeps(rustls("0.23.5"));
+    const [f] = matchDeps(rustls("0.23.27"));
     expect(f?.pq_status).toBe("transitional");
     expect(f?.severity).toBe("info");
-    expect(f?.recommendation).toMatch(/at or above 0\.23\.0/);
+    expect(f?.recommendation).toMatch(/at or above 0\.23\.22/);
   });
 
   it("flags conservatively at low confidence when the version cannot be resolved", () => {
