@@ -16,18 +16,15 @@
  * oversized, binary, over a resource ceiling) is reported as an `info` coverage
  * finding, so a clean result never hides a gap. Directory entries are visited
  * in sorted order, so finding order and ids do not depend on the filesystem.
- * The clone helper lets the CLI scan a remote repo by URL.
+ * Remote repositories are cloned by clone.ts, behind the SSRF guard.
  */
-import { execFile } from "node:child_process";
 import { createPublicKey } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 import { constants } from "node:fs";
 import type { Dirent } from "node:fs";
-import { mkdtemp, open, opendir, rm } from "node:fs/promises";
+import { open, opendir } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
-import { promisify } from "node:util";
 import type { Category, Confidence, Finding, Severity } from "../report";
 import { curveFriendlyName, keyAlgorithmLabel } from "../crypto";
 import type { KeyType } from "../crypto";
@@ -35,8 +32,6 @@ import { isJsTsFile, scanJsAst } from "./source-ast";
 import type { ScanJsResult } from "./source-ast";
 import { REGEX_MATCHERS, REGEX_WINDOW_CHARS, assess, sourceRule } from "./source-rules";
 import type { RegexLanguage, RegexMatcher, RuleHit, RuleId, RuleSelection } from "./source-rules";
-
-const execFileAsync = promisify(execFile);
 
 export interface SourceScanOptions {
   /** Directories skipped during the walk. */
@@ -838,26 +833,4 @@ export async function scanSource(rootDir: string, options: SourceScanOptions = {
   };
   await walk(rootDir, state);
   return [...state.findings, ...coverageFindings(state, maxFiles, maxTotalBytes)];
-}
-
-export interface ClonedRepo {
-  dir: string;
-  cleanup: () => Promise<void>;
-}
-
-const SAFE_REPO_URL = /^(?:https:\/\/[\w.-]+\/[\w./-]+?(?:\.git)?|git@[\w.-]+:[\w./-]+?(?:\.git)?)$/;
-
-/** Shallow-clone a github repo into a temp dir. The caller must invoke cleanup(). */
-export async function cloneRepo(url: string): Promise<ClonedRepo> {
-  if (!SAFE_REPO_URL.test(url)) {
-    throw new Error(`Refusing to clone unsafe repository URL: ${url}`);
-  }
-  const dir = await mkdtemp(join(tmpdir(), "cryptosweep-"));
-  try {
-    await execFileAsync("git", ["clone", "--depth", "1", "--quiet", url, dir], { timeout: 120_000 });
-  } catch (err) {
-    await rm(dir, { recursive: true, force: true });
-    throw err instanceof Error ? err : new Error(String(err));
-  }
-  return { dir, cleanup: () => rm(dir, { recursive: true, force: true }) };
 }
