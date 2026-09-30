@@ -9,11 +9,16 @@
  *
  * Post-quantum key exchange is established by offering each standardized
  * ML-KEM group on its own over TLS 1.3 and reading back the group the runtime
- * reports as negotiated.
+ * reports as negotiated. The target is resolved and vetted once, and every
+ * connection goes to a vetted address, so a rebinding resolver cannot steer a
+ * later connection somewhere the guard never saw.
  */
 import { connect as tlsConnect, createSecureContext } from "node:tls";
 import type { ConnectionOptions, DetailedPeerCertificate, TLSSocket } from "node:tls";
 import { isIP } from "node:net";
+import type { LookupFunction } from "node:net";
+import { lookup as dnsLookup } from "node:dns/promises";
+import type { LookupAddress } from "node:dns";
 import { X509Certificate } from "node:crypto";
 import { certificateSignatureOid, signatureAlgorithmName } from "../asn1";
 import {
@@ -29,7 +34,7 @@ import {
   toKeyType,
 } from "../crypto";
 import type { KeyType } from "../crypto";
-import { assertTargetAllowed } from "../net-guard";
+import { isBlockedAddress } from "../net-guard";
 import type { Confidence, Finding, Location, PqStatus, Reference, Severity } from "../report";
 
 export type { KeyType } from "../crypto";
@@ -1008,6 +1013,71 @@ function collectChain(leaf: DetailedPeerCertificate): CertInfo[] {
   return chain;
 }
 
+/** A scan target resolved once and vetted: every connection goes to one of these addresses. */
+interface ResolvedTarget {
+  /** The name (or IP literal) given to `tls.connect`. */
+  host: string;
+  /** SNI and certificate-identity name; absent for an IP literal, which SNI forbids. */
+  servername?: string;
+  addresses: LookupAddress[];
+}
+
+/**
+ * Resolve `host` once and vet every address it resolves to.
+ *
+ * Fails closed: a lookup error refuses the scan instead of letting a later
+ * connect resolve the name on its own, and one blocked address refuses the
+ * whole name, since the kernel may connect to any of them.
+ */
+async function resolveTarget(host: string, allowPrivate: boolean): Promise<ResolvedTarget> {
+  const bare = host.replace(/^\[(.*)\]$/, "$1"); // strip IPv6 brackets
+  const family = isIP(bare);
+  if (family !== 0) {
+    if (!allowPrivate && isBlockedAddress(bare)) throw new Error(`Refusing to scan non-public address: ${host}`);
+    return { host: bare, addresses: [{ address: bare, family }] };
+  }
+
+  let addresses: LookupAddress[];
+  try {
+    addresses = await dnsLookup(bare, { all: true });
+  } catch (err) {
+    const code = errorCode(err) ?? "lookup failed";
+    throw new Error(`Could not resolve ${host} (${code}); refusing to scan a name that did not resolve.`, {
+      cause: err,
+    });
+  }
+  if (addresses.length === 0 || addresses.some((a) => isIP(a.address) === 0)) {
+    throw new Error(`Could not resolve ${host} to a usable address; refusing to scan it.`);
+  }
+  const blocked = allowPrivate ? undefined : addresses.find((a) => isBlockedAddress(a.address));
+  if (blocked) {
+    throw new Error(
+      `Refusing to scan ${host}: resolves to non-public address ${blocked.address}. Pass --allow-private to override.`,
+    );
+  }
+  return { host: bare, servername: bare, addresses };
+}
+
+/**
+ * A `lookup` for `tls.connect` that answers only with the vetted addresses.
+ * Without it Node resolves the name again at connect time, and a rebinding
+ * resolver can answer that second query with an internal address. Handing Node
+ * the whole vetted list keeps its happy-eyeballs fallback across families.
+ */
+function pinnedLookup(addresses: readonly LookupAddress[]): LookupFunction {
+  return (_hostname, options, callback) => {
+    const family = options.family === "IPv4" ? 4 : options.family === "IPv6" ? 6 : (options.family ?? 0);
+    const matching = family === 0 ? [...addresses] : addresses.filter((a) => a.family === family);
+    const first = matching[0];
+    if (!first) {
+      callback(Object.assign(new Error(`No vetted IPv${family} address`), { code: "ENOTFOUND" }), "");
+      return;
+    }
+    if (options.all) callback(null, matching);
+    else callback(null, first.address, first.family);
+  };
+}
+
 const localGroupSupport = new Map<string, boolean>();
 
 /** Does the local OpenSSL implement a key-exchange group? Unknown names make it throw. */
@@ -1025,12 +1095,12 @@ function locallySupported(group: string): boolean {
   return supported;
 }
 
-function connectOptions(host: string, port: number): ConnectionOptions {
+function connectOptions(target: ResolvedTarget, port: number): ConnectionOptions {
   return {
-    host,
+    host: target.host,
     port,
-    // SNI must be a hostname; Node rejects an IP literal as servername.
-    ...(isIP(host) ? {} : { servername: host }),
+    ...(target.servername ? { servername: target.servername } : {}),
+    lookup: pinnedLookup(target.addresses),
     rejectUnauthorized: false,
   };
 }
@@ -1086,12 +1156,12 @@ function authorizationFailure(socket: TLSSocket): string | null {
 type HandshakeResult = Omit<TlsScanResult, "hybridKex" | "groupProbes">;
 
 async function readHandshake(
-  host: string,
+  target: ResolvedTarget,
   port: number,
   timeoutMs: number,
   offer: ConnectionOptions,
 ): Promise<HandshakeResult> {
-  const options = { ...connectOptions(host, port), ALPNProtocols: ["h2", "http/1.1"], ...offer };
+  const options = { ...connectOptions(target, port), ALPNProtocols: ["h2", "http/1.1"], ...offer };
   const socket = await openTls(options, timeoutMs);
   try {
     const ephemeral = ephemeralKey(socket);
@@ -1113,14 +1183,14 @@ async function readHandshake(
  * A server that refuses a modern offer at the TLS layer gets one retry with the
  * legacy offer, so a TLS 1.0 server is reported rather than aborting the scan.
  */
-async function handshake(host: string, port: number, timeoutMs: number): Promise<HandshakeResult> {
+async function handshake(target: ResolvedTarget, port: number, timeoutMs: number): Promise<HandshakeResult> {
   const groups = PRIMARY_HANDSHAKE_GROUPS.filter(locallySupported).join(":");
   const modern: ConnectionOptions = groups ? { ecdhCurve: groups } : {};
   try {
-    return await readHandshake(host, port, timeoutMs, modern);
+    return await readHandshake(target, port, timeoutMs, modern);
   } catch (err) {
     if (!isTlsLayerError(err)) throw err;
-    const legacy = await readHandshake(host, port, timeoutMs, { ...modern, ...LEGACY_OFFER }).catch(() => null);
+    const legacy = await readHandshake(target, port, timeoutMs, { ...modern, ...LEGACY_OFFER }).catch(() => null);
     if (!legacy) throw err;
     return { ...legacy, legacyHandshake: true };
   }
@@ -1133,7 +1203,7 @@ async function handshake(host: string, port: number, timeoutMs: number): Promise
  * classical handshake (even static RSA) and pass as post-quantum.
  */
 async function probeGroup(
-  host: string,
+  target: ResolvedTarget,
   port: number,
   timeoutMs: number,
   group: string,
@@ -1144,7 +1214,7 @@ async function probeGroup(
   }
   let socket: TLSSocket;
   try {
-    socket = await openTls({ ...connectOptions(host, port), minVersion: "TLSv1.3", ecdhCurve: group }, timeoutMs);
+    socket = await openTls({ ...connectOptions(target, port), minVersion: "TLSv1.3", ecdhCurve: group }, timeoutMs);
   } catch (err) {
     const code = errorCode(err) ?? (err instanceof Error ? err.message : String(err));
     // The primary handshake shows the host speaks TLS, so a TLS-layer failure
@@ -1170,22 +1240,24 @@ function summarizeProbes(probes: GroupProbeResult[]): HybridSupport {
   return "unknown";
 }
 
-const defaultProbe: TlsProbe = async (host, port, timeoutMs) => {
-  const probeTimeout = Math.min(timeoutMs, PROBE_TIMEOUT_CAP_MS);
-  const [base, groupProbes] = await Promise.all([
-    handshake(host, port, timeoutMs),
-    Promise.all(PQ_GROUPS.map((g) => probeGroup(host, port, probeTimeout, g.name))),
-  ]);
-  return { ...base, hybridKex: summarizeProbes(groupProbes), groupProbes };
-};
+/** The live probe, bound to addresses that were resolved and vetted once. */
+function networkProbe(target: ResolvedTarget): TlsProbe {
+  return async (_host, port, timeoutMs) => {
+    const probeTimeout = Math.min(timeoutMs, PROBE_TIMEOUT_CAP_MS);
+    const [base, groupProbes] = await Promise.all([
+      handshake(target, port, timeoutMs),
+      Promise.all(PQ_GROUPS.map((g) => probeGroup(target, port, probeTimeout, g.name))),
+    ]);
+    return { ...base, hybridKex: summarizeProbes(groupProbes), groupProbes };
+  };
+}
 
 /** Scan a host's TLS posture and return findings. */
 export async function scanTls(host: string, options: TlsScanOptions = {}): Promise<Finding[]> {
   const port = options.port ?? 443;
   const timeoutMs = options.timeoutMs ?? 10_000;
-  const probe = options.probe ?? defaultProbe;
-  // Only guard the real network path; an injected probe is trusted (and offline).
-  if (!options.probe) await assertTargetAllowed(host, options.allowPrivate);
+  // Only the real network path resolves and vets; an injected probe is trusted (and offline).
+  const probe = options.probe ?? networkProbe(await resolveTarget(host, options.allowPrivate ?? false));
   const result = await probe(host, port, timeoutMs);
   return analyzeTls(result, `${host}:${port}`, new Date(), { host, port });
 }
