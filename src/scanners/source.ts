@@ -362,7 +362,11 @@ const REGEX_BY_LANGUAGE: ReadonlyMap<RegexLanguage, readonly RegexMatcher[]> = (
   return map;
 })();
 
-/** Index of the first unescaped `quote` at or after `from` (or `limit`); `\` skips a character. */
+/**
+ * Index just past the closing `quote` of a string starting at `from`. With
+ * `escapes`, a backslash skips the next character; a single-line string also
+ * ends at a newline (unterminated), and the end of the file ends any string.
+ */
 function skipQuoted(content: string, from: number, quote: string, multiline: boolean, escapes: boolean): number {
   let i = from;
   while (i < content.length) {
