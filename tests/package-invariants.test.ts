@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { VERSION } from "../src/version";
 
 /**
  * Lean-runtime invariant. The AST scanner uses @babel/parser, but only as a
@@ -12,10 +13,19 @@ import { describe, expect, it } from "vitest";
 describe("package invariants", () => {
   const pkg = JSON.parse(
     readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
-  ) as { dependencies: Record<string, string>; engines?: { node?: string } };
+  ) as { version: string; dependencies: Record<string, string>; engines?: { node?: string } };
 
   it("has exactly one runtime dependency (cac)", () => {
     expect(Object.keys(pkg.dependencies)).toEqual(["cac"]);
+  });
+
+  it("reports one version everywhere: package.json, the CLI/SARIF VERSION and the Urfael manifest", () => {
+    const plugin = JSON.parse(
+      readFileSync(fileURLToPath(new URL("../integrations/urfael/plugin.json", import.meta.url)), "utf8"),
+    ) as { version: string; author: string; provenance: { sourceUrl: string } };
+    expect(VERSION).toBe(pkg.version);
+    expect(plugin.version).toBe(pkg.version);
+    expect(plugin.provenance.sourceUrl).toBe("https://github.com/maximilliangrand/cryptosweep");
   });
 
   it("targets Node >= 22, the oldest line CI runs (the parser stays pinned to Babel 7.x)", () => {

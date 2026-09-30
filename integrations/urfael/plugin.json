@@ -3,8 +3,8 @@
   "id": "cryptosweep",
   "name": "cryptosweep",
   "description": "Post-quantum cryptography scanner: inventory cryptography, flag quantum-vulnerable primitives, and compute harvest-now-decrypt-later (Mosca-clock) risk.",
-  "version": "0.1.0",
-  "author": "Grandillionaire",
+  "version": "0.2.0",
+  "author": "maximilliangrand",
   "license": "MIT",
   "runtime": "mcp-native",
   "entry": {
@@ -16,7 +16,7 @@
       "tools": [
         {
           "name": "scan",
-          "description": "Scan a target (hostname/URL, GitHub owner/repo, or local path) for quantum-vulnerable cryptography; returns the inventory plus a harvest-now-decrypt-later (Mosca-clock) risk assessment."
+          "description": "Scan a target (hostname/URL, public GitHub owner/repo, or a directory under the configured root) for quantum-vulnerable cryptography; returns the inventory, the harvest-now-decrypt-later (Mosca-clock) risk assessment and what the scan covered."
         },
         {
           "name": "data_classes",
@@ -26,6 +26,6 @@
     }
   },
   "provenance": {
-    "sourceUrl": "https://github.com/Grandillionaire/cryptosweep"
+    "sourceUrl": "https://github.com/maximilliangrand/cryptosweep"
   }
 }
