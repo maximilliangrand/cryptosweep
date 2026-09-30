@@ -64,10 +64,12 @@ describe("key-type knowledge base", () => {
     expect(ir8547Transition("rsa", 1024, null)).toBeNull(); // already below the SP 800-131A floor
   });
 
-  it("cites the draft that actually defines X25519MLKEM768", () => {
-    expect(REFS.hybridKex.url).toContain("draft-ietf-tls-ecdhe-mlkem");
+  it("cites the RFC that actually defines X25519MLKEM768, and the pure ML-KEM draft as a draft", () => {
+    // draft-ietf-tls-ecdhe-mlkem was published as RFC 10024, draft-ietf-tls-hybrid-design as RFC 9954.
+    expect(REFS.hybridKex.url).toBe("https://www.rfc-editor.org/rfc/rfc10024");
     expect(REFS.hybridKex.label).toContain("X25519MLKEM768");
-    expect(REFS.hybridDesign.url).toContain("draft-ietf-tls-hybrid-design");
+    expect(REFS.hybridDesign.url).toBe("https://www.rfc-editor.org/rfc/rfc9954");
+    expect(REFS.mlkemKex.url).toContain("draft-ietf-tls-mlkem");
     expect(REFS.sp800131a.label).not.toMatch(/SHA-1/); // it is cited for key lengths too
   });
 });

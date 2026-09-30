@@ -130,15 +130,15 @@ export interface TlsScanOptions {
 interface PqGroup {
   name: string;
   kem: string;
-  /** Combined with a classical ECDHE share (draft-ietf-tls-ecdhe-mlkem) rather than pure ML-KEM. */
+  /** Combined with a classical ECDHE share (RFC 10024) rather than pure ML-KEM. */
   hybrid: boolean;
 }
 
 /**
  * The standardized post-quantum groups, each probed on its own. The hybrids are
- * specified in draft-ietf-tls-ecdhe-mlkem and the pure groups in
- * draft-ietf-tls-mlkem. CNSA 2.0 specifies ML-KEM-1024 for key establishment,
- * so only the last two rows can meet it.
+ * specified in RFC 10024 and the pure groups in draft-ietf-tls-mlkem. CNSA 2.0
+ * specifies ML-KEM-1024 for key establishment, so only the last two rows can
+ * meet it.
  */
 const PQ_GROUPS: readonly PqGroup[] = [
   { name: "X25519MLKEM768", kem: "ML-KEM-768", hybrid: true },

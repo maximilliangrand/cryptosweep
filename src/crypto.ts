@@ -34,15 +34,17 @@ export const REFS = {
     url: "https://cwe.mitre.org/data/definitions/327.html",
   },
   // The document that specifies the X25519MLKEM768 codepoint (and the NIST-curve
-  // hybrids). draft-ietf-tls-hybrid-design is only the generic construction.
+  // hybrids), published from draft-ietf-tls-ecdhe-mlkem. RFC 9954 (formerly
+  // draft-ietf-tls-hybrid-design) is only the generic construction.
   hybridKex: {
-    label: "draft-ietf-tls-ecdhe-mlkem (X25519MLKEM768, SecP256r1MLKEM768, SecP384r1MLKEM1024)",
-    url: "https://datatracker.ietf.org/doc/draft-ietf-tls-ecdhe-mlkem/",
+    label: "RFC 10024 (PQ/T hybrid key agreement for TLS 1.3: X25519MLKEM768, SecP256r1MLKEM768, SecP384r1MLKEM1024)",
+    url: "https://www.rfc-editor.org/rfc/rfc10024",
   },
   hybridDesign: {
-    label: "draft-ietf-tls-hybrid-design (hybrid key exchange in TLS 1.3)",
-    url: "https://datatracker.ietf.org/doc/draft-ietf-tls-hybrid-design/",
+    label: "RFC 9954 (hybrid key exchange in TLS 1.3)",
+    url: "https://www.rfc-editor.org/rfc/rfc9954",
   },
+  // Still an Internet-Draft; no RFC number has been assigned.
   mlkemKex: {
     label: "draft-ietf-tls-mlkem (pure ML-KEM groups MLKEM768, MLKEM1024 for TLS 1.3)",
     url: "https://datatracker.ietf.org/doc/draft-ietf-tls-mlkem/",
