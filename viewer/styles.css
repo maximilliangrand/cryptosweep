@@ -180,6 +180,14 @@ body {
 .csw-risk {
   padding: 16px 20px 0;
 }
+.csw-coverage {
+  margin: 16px 20px 0;
+  width: auto;
+}
+.csw-coverage ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
 .csw-risk .bp5-callout {
   border-left: 3px solid;
 }

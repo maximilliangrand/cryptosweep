@@ -45,11 +45,18 @@ interface Finding {
   recommendation: string;
   references?: Reference[];
 }
+interface CoverageEntry {
+  check: string;
+  scope: string;
+  complete: boolean;
+  note?: string;
+}
 interface Report {
   target: string;
   scanned_at: string;
   summary: Record<Severity | "findings", number>;
   findings: Finding[];
+  coverage?: CoverageEntry[];
 }
 interface MoscaVerdict {
   threat: string;
@@ -165,6 +172,23 @@ function RiskBanner({ risk }: { risk: RiskModel }): JSX.Element {
         </div>
       ) : null}
     </section>
+  );
+}
+
+/** What each check examined, so a short or empty findings list is never read as a clean bill of health. */
+function CoverageCallout({ coverage }: { coverage: CoverageEntry[] }): JSX.Element {
+  const partial = coverage.some((entry) => !entry.complete);
+  return (
+    <Callout className="csw-coverage" intent={partial ? Intent.WARNING : Intent.NONE} title={partial ? "Coverage (partial)" : "Coverage"}>
+      <ul>
+        {coverage.map((entry) => (
+          <li key={entry.check}>
+            <strong>{entry.check}</strong>: {entry.scope}{" "}
+            <span className={Classes.TEXT_MUTED}>{entry.complete ? "(complete)" : `(partial${entry.note ? `: ${entry.note}` : ""})`}</span>
+          </li>
+        ))}
+      </ul>
+    </Callout>
   );
 }
 
@@ -285,6 +309,7 @@ function App(): JSX.Element {
       </Navbar>
 
       {risk ? <RiskBanner risk={risk} /> : null}
+      {report.coverage?.length ? <CoverageCallout coverage={report.coverage} /> : null}
 
       <div className="csw-tiles">
         <Tile n={report.summary?.critical} label="Critical" kind="critical" />
