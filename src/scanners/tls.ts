@@ -6,9 +6,13 @@
  * typed from a parsed `KeyObject` and every signature algorithm from the
  * certificate's actual ASN.1 `signatureAlgorithm` field, never from guessing at
  * bytes, so a "vulnerable" verdict is defensible to an auditor.
+ *
+ * Post-quantum key exchange is established by offering each standardized
+ * ML-KEM group on its own over TLS 1.3 and reading back the group the runtime
+ * reports as negotiated.
  */
-import { connect as tlsConnect } from "node:tls";
-import type { DetailedPeerCertificate } from "node:tls";
+import { connect as tlsConnect, createSecureContext } from "node:tls";
+import type { ConnectionOptions, DetailedPeerCertificate, TLSSocket } from "node:tls";
 import { isIP } from "node:net";
 import { X509Certificate } from "node:crypto";
 import { certificateSignatureOid, signatureAlgorithmName } from "../asn1";
@@ -53,24 +57,48 @@ export interface CertInfo {
 }
 
 /**
- * Whether the server will negotiate a hybrid post-quantum key-exchange group.
- * Determined by an active capability probe, because Node does not expose the
- * negotiated group for TLS 1.3 sessions.
+ * Aggregate verdict of the post-quantum key-exchange probes: "supported" when
+ * the server accepted at least one ML-KEM group over TLS 1.3, "unsupported"
+ * when it refused every group that could be offered, "unknown" otherwise.
  */
 export type HybridSupport = "supported" | "unsupported" | "unknown";
+
+/**
+ * Outcome of offering one key-exchange group on its own.
+ *
+ * - `accepted`: TLS 1.3 completed and the runtime reported that group as the
+ *   negotiated one (Node exposes it as `{ type: "TLSGroup", name }`).
+ * - `rejected`: the server failed the handshake at the TLS layer.
+ * - `inconclusive`: a transport error, a timeout, or a completed handshake the
+ *   runtime could not attribute to the group.
+ * - `untestable`: the local OpenSSL does not implement the group.
+ */
+export type GroupOutcome = "accepted" | "rejected" | "inconclusive" | "untestable";
+
+export interface GroupProbeResult {
+  group: string;
+  outcome: GroupOutcome;
+  /** Error code or reason behind the outcome, kept as evidence. */
+  detail?: string;
+}
 
 export interface TlsScanResult {
   protocol: string | null;
   cipherName: string | null;
-  /** Negotiated key-exchange group, e.g. "X25519", "P-256", "X25519MLKEM768". */
+  /** Negotiated key-exchange group, e.g. "X25519", "prime256v1", "X25519MLKEM768". */
   groupName: string | null;
-  /** Result of actively probing for hybrid PQ key exchange (X25519MLKEM768). */
+  /** Ephemeral key size in bits, when reported (finite-field DHE has no group name). */
+  groupBits?: number | null;
+  /** Aggregate result of the post-quantum key-exchange probes. */
   hybridKex?: HybridSupport;
+  /** Per-group outcomes of the post-quantum key-exchange probes. */
+  groupProbes?: GroupProbeResult[];
+  /** Why the chain failed validation against the local trust store, or null if it validated. */
+  authorizationError?: string | null;
+  /** True when only a legacy client offer (TLS 1.0+, OpenSSL security level 0) completed. */
+  legacyHandshake?: boolean;
   chain: CertInfo[];
 }
-
-/** The IANA/OpenSSL name of the standardized hybrid group we probe for. */
-const HYBRID_GROUP = "X25519MLKEM768";
 
 export type TlsProbe = (host: string, port: number, timeoutMs: number) => Promise<TlsScanResult>;
 
@@ -81,6 +109,60 @@ export interface TlsScanOptions {
   /** Allow scanning non-public addresses (localhost, RFC 1918). Off by default. */
   allowPrivate?: boolean;
 }
+
+/** A post-quantum TLS 1.3 key-exchange group and the ML-KEM parameter set inside it. */
+interface PqGroup {
+  name: string;
+  kem: string;
+  /** Combined with a classical ECDHE share (draft-ietf-tls-ecdhe-mlkem) rather than pure ML-KEM. */
+  hybrid: boolean;
+}
+
+/**
+ * The standardized post-quantum groups, each probed on its own. The hybrids are
+ * specified in draft-ietf-tls-ecdhe-mlkem and the pure groups in
+ * draft-ietf-tls-mlkem. CNSA 2.0 specifies ML-KEM-1024 for key establishment,
+ * so only the last two rows can meet it.
+ */
+const PQ_GROUPS: readonly PqGroup[] = [
+  { name: "X25519MLKEM768", kem: "ML-KEM-768", hybrid: true },
+  { name: "SecP256r1MLKEM768", kem: "ML-KEM-768", hybrid: true },
+  { name: "MLKEM768", kem: "ML-KEM-768", hybrid: false },
+  { name: "SecP384r1MLKEM1024", kem: "ML-KEM-1024", hybrid: true },
+  { name: "MLKEM1024", kem: "ML-KEM-1024", hybrid: false },
+];
+
+/**
+ * Groups the primary handshake offers, in preference order. It leads like a
+ * current browser (X25519MLKEM768, then X25519) and then offers every other
+ * standardized group, so a server that accepts only a NIST-curve hybrid or only
+ * pure ML-KEM still completes a handshake and gets scanned.
+ */
+const PRIMARY_HANDSHAKE_GROUPS = [
+  "X25519MLKEM768",
+  "X25519",
+  "SecP256r1MLKEM768",
+  "SecP384r1MLKEM1024",
+  "MLKEM768",
+  "MLKEM1024",
+  "prime256v1",
+  "secp384r1",
+  "secp521r1",
+  "X448",
+  "ffdhe2048",
+  "ffdhe3072",
+  "ffdhe4096",
+];
+
+/**
+ * The fallback offer for servers that refuse a TLS 1.2+ handshake at the
+ * default security level. Obsolete servers are exactly what the scan must
+ * report, so it accepts anything that still authenticates the server.
+ */
+const LEGACY_OFFER: ConnectionOptions = { minVersion: "TLSv1", ciphers: "ALL:!aNULL:!eNULL:@SECLEVEL=0" };
+
+/** Probes cap their own timeout so six parallel connections cannot stall a scan. */
+const PROBE_TIMEOUT_CAP_MS = 8000;
 
 const HYBRID_KEX = /MLKEM|KYBER/i;
 
@@ -512,36 +594,72 @@ function evaluateIntermediateSignatures(chain: CertInfo[], target: string): Find
   });
 }
 
-function evaluateProtocol(protocol: string | null, evidence: string): Finding | null {
+/** Report a chain that failed validation (trust store or hostname) instead of ignoring it. */
+function evaluateChainTrust(result: TlsScanResult, target: string): Finding | null {
+  if (!result.authorizationError) return null;
+  return {
+    id: "CSW-TLS-008",
+    ruleId: "tls/chain-untrusted",
+    severity: "medium",
+    category: "tls",
+    title: `Certificate chain did not validate (${result.authorizationError})`,
+    evidence: target,
+    pq_status: "unknown",
+    confidence: "confirmed",
+    recommendation:
+      "The served chain failed validation against this machine's trust store or the hostname check. The key and signature findings describe the certificates as served and do not vouch for them; an untrusted chain on a public host can also mean the scan itself was intercepted.",
+  };
+}
+
+/** What a single handshake cannot show, stated so the report is not read as more than it is. */
+const PROTOCOL_SCOPE =
+  "Not assessed: other protocol versions and cipher suites the server may also accept (only the ones negotiated for this client offer were observed).";
+
+function evaluateProtocol(result: TlsScanResult, target: string): Finding | null {
+  const protocol = result.protocol;
   if (!protocol) return null;
-  if (protocol === "TLSv1.3" || protocol === "TLSv1.2") {
+  const evidence = [
+    target,
+    result.cipherName ? `cipher=${result.cipherName}` : "",
+    result.legacyHandshake ? "(completed only with a legacy TLS 1.0+, security-level-0 client offer)" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const base = {
+    id: "CSW-TLS-004",
+    ruleId: "tls/negotiated-protocol",
+    category: "tls" as const,
+    evidence,
+    confidence: "confirmed" as const,
+    references: [REFS.hybridKex, REFS.mlkemKex],
+  };
+
+  if (protocol === "TLSv1.3") {
     return {
-      id: "CSW-TLS-004",
-      ruleId: "tls/negotiated-protocol",
-      severity: protocol === "TLSv1.3" ? "info" : "medium",
-      category: "tls",
-      title: `Negotiated ${protocol}`,
-      evidence,
+      ...base,
+      severity: "info",
+      title: "Negotiated TLSv1.3",
       pq_status: "transitional",
-      confidence: "confirmed",
-      references: [REFS.hybridKex],
-      recommendation:
-        protocol === "TLSv1.3"
-          ? "TLS 1.3 is required for hybrid post-quantum key exchange, keep it enabled."
-          : "Upgrade to TLS 1.3 to enable hybrid post-quantum key exchange (X25519MLKEM768).",
+      recommendation: `TLS 1.3 is required for post-quantum key exchange, keep it enabled. ${PROTOCOL_SCOPE}`,
+    };
+  }
+  if (protocol === "TLSv1.2") {
+    // Every ML-KEM group is a TLS 1.3 construction, so a TLS 1.2 session can
+    // only ever use classical key exchange.
+    return {
+      ...base,
+      severity: "medium",
+      title: "Negotiated TLSv1.2",
+      pq_status: "vulnerable",
+      recommendation: `TLS 1.2 cannot carry post-quantum key exchange: the ML-KEM groups are defined only for TLS 1.3. Enable TLS 1.3. ${PROTOCOL_SCOPE}`,
     };
   }
   return {
-    id: "CSW-TLS-004",
-    ruleId: "tls/negotiated-protocol",
+    ...base,
     severity: "high",
-    category: "tls",
     title: `Obsolete protocol negotiated (${protocol})`,
-    evidence,
     pq_status: "vulnerable",
-    confidence: "confirmed",
-    references: [REFS.hybridKex],
-    recommendation: "Disable TLS < 1.2 and adopt TLS 1.3 to support post-quantum key exchange.",
+    recommendation: `Disable TLS < 1.2 (deprecated by RFC 8996) and adopt TLS 1.3 to support post-quantum key exchange. ${PROTOCOL_SCOPE}`,
   };
 }
 
@@ -579,78 +697,219 @@ function evaluateValidity(cert: CertInfo, evidence: string, now: Date): Finding 
   return null;
 }
 
-function evaluateHybridKex(result: TlsScanResult, evidence: string): Finding {
-  const base = { id: "CSW-TLS-005", ruleId: "tls/hybrid-kex", category: "tls" as const };
+// --- Key exchange ------------------------------------------------------------
 
-  // Preferred signal: the active capability probe.
-  if (result.hybridKex === "supported") {
-    return {
-      ...base,
-      severity: "info",
-      title: `Server supports hybrid post-quantum key exchange (${HYBRID_GROUP})`,
-      evidence: `${evidence} group=${HYBRID_GROUP}`,
-      pq_status: "transitional",
-      confidence: "confirmed",
-      algorithm: HYBRID_GROUP,
-      references: [REFS.hybridKex, REFS.fips203],
-      recommendation:
-        "Hybrid KEX available, keep it enabled and track migration to standalone ML-KEM once mandated.",
-    };
-  }
-  if (result.hybridKex === "unsupported") {
-    return {
-      ...base,
-      severity: "medium",
-      title: "Server does not support hybrid post-quantum key exchange",
-      evidence: `${evidence} group=${HYBRID_GROUP}`,
-      pq_status: "vulnerable",
-      confidence: "confirmed",
-      references: [REFS.hybridKex, REFS.fips203],
-      recommendation:
-        "Enable X25519MLKEM768 so session keys resist harvest-now-decrypt-later attacks.",
-    };
-  }
+/** Identify a post-quantum group by name, including ones outside the probed set. */
+function pqGroup(name: string | null | undefined): PqGroup | null {
+  if (!name || !HYBRID_KEX.test(name)) return null;
+  const known = PQ_GROUPS.find((g) => g.name.toLowerCase() === name.toLowerCase());
+  if (known) return known;
+  const level = /MLKEM(512|768|1024)/i.exec(name)?.[1];
+  return { name, kem: level ? `ML-KEM-${level}` : "pre-standard Kyber", hybrid: !/^MLKEM\d+$/i.test(name) };
+}
 
-  // Fallback: a negotiated group name, when one was observable (TLS 1.2 / injected).
-  const negotiated = `${result.groupName ?? ""} ${result.cipherName ?? ""}`.trim();
-  if (HYBRID_KEX.test(negotiated)) {
+/** A classical key exchange as negotiated, labelled for the inventory. */
+interface ClassicalKex {
+  label: string;
+  forwardSecret: boolean;
+  classicallyWeak: boolean;
+}
+
+/**
+ * RSA key-transport suites carry no key-exchange prefix in OpenSSL naming
+ * (e.g. "AES256-GCM-SHA384", "DES-CBC3-SHA"), unlike "ECDHE-…" and "DHE-…".
+ */
+const RSA_KEY_TRANSPORT = /^(?:AES|ARIA|CAMELLIA|DES|IDEA|NULL|RC2|RC4|SEED)/i;
+
+function finiteFieldKex(prefix: string, bits: number | null): ClassicalKex {
+  return {
+    label: bits === null ? prefix : `${prefix}-${bits}`,
+    forwardSecret: true,
+    classicallyWeak: bits !== null && bits < 2048,
+  };
+}
+
+/** Describe the classical key exchange this session used, or null if it cannot be told. */
+function classicalKeyExchange(result: TlsScanResult): ClassicalKex | null {
+  const cipher = result.cipherName ?? "";
+  const bits = result.groupBits ?? null;
+  const tls13 = result.protocol === "TLSv1.3" || cipher.startsWith("TLS_");
+  if (!tls13 && RSA_KEY_TRANSPORT.test(cipher)) {
+    return { label: "static-RSA-key-exchange", forwardSecret: false, classicallyWeak: false };
+  }
+  if (!tls13 && /^(?:DHE|EDH)-/.test(cipher)) return finiteFieldKex("DHE", bits);
+  if (result.groupName && !pqGroup(result.groupName)) {
+    const curve = curveFriendlyName(result.groupName) ?? result.groupName;
+    return { label: `ECDHE-${curve}`, forwardSecret: true, classicallyWeak: false };
+  }
+  if (!tls13 && /^(?:ECDHE|EECDH)-/.test(cipher)) return { label: "ECDHE", forwardSecret: true, classicallyWeak: false };
+  if (tls13 && bits !== null) return finiteFieldKex("FFDHE", bits);
+  return null;
+}
+
+/**
+ * Per-group probe outcomes. A caller-supplied aggregate verdict (the older,
+ * single-group probe API) describes X25519MLKEM768 alone.
+ */
+function probeResults(result: TlsScanResult): GroupProbeResult[] {
+  if (result.groupProbes) return result.groupProbes;
+  if (result.hybridKex === "supported") return [{ group: "X25519MLKEM768", outcome: "accepted" }];
+  if (result.hybridKex === "unsupported") return [{ group: "X25519MLKEM768", outcome: "rejected" }];
+  return [];
+}
+
+/** Groups the server demonstrably accepted: the probes, plus a PQ group the primary handshake negotiated. */
+function acceptedGroups(result: TlsScanResult, probes: GroupProbeResult[]): PqGroup[] {
+  const names = [result.groupName, ...probes.filter((p) => p.outcome === "accepted").map((p) => p.group)];
+  const accepted: PqGroup[] = [];
+  for (const name of names) {
+    const group = pqGroup(name);
+    if (group && !accepted.some((g) => g.name.toLowerCase() === group.name.toLowerCase())) accepted.push(group);
+  }
+  return accepted;
+}
+
+function kexEvidence(target: string, result: TlsScanResult, probes: GroupProbeResult[]): string {
+  const parts = [target];
+  if (result.groupName) parts.push(`group=${result.groupName}`);
+  if (result.cipherName) parts.push(`cipher=${result.cipherName}`);
+  for (const outcome of ["accepted", "rejected", "inconclusive", "untestable"] as const) {
+    const groups = probes
+      .filter((p) => p.outcome === outcome)
+      .map((p) => (p.detail && outcome !== "rejected" ? `${p.group} (${p.detail})` : p.group));
+    if (groups.length > 0) parts.push(`${outcome}=${groups.join(", ")}`);
+  }
+  return parts.join(" ");
+}
+
+const KEX_BASE = { id: "CSW-TLS-005", ruleId: "tls/hybrid-kex", category: "tls" as const };
+const ENABLE_PQ_KEX =
+  "Enable X25519MLKEM768 (SecP384r1MLKEM1024 or MLKEM1024 where CNSA 2.0 applies) so session keys resist harvest-now-decrypt-later attacks.";
+
+/** Below TLS 1.3 there is no ML-KEM group to negotiate, whatever a probe claimed. */
+function preTls13KeyExchange(result: TlsScanResult, target: string, probes: GroupProbeResult[]): Finding {
+  const protocol = result.protocol ?? "TLS < 1.3";
+  const kex = classicalKeyExchange(result);
+  const noForwardSecrecy = kex?.forwardSecret === false;
+  const recommendation = noForwardSecrecy
+    ? "Static RSA key transport: whoever records this traffic and later recovers the one RSA key (stolen today, or broken by a quantum computer later) decrypts every recorded session. Disable RSA key-exchange suites and enable TLS 1.3 with X25519MLKEM768."
+    : kex?.classicallyWeak
+      ? `${kex.label} is below the SP 800-131A 2048-bit floor and breakable classically. Disable it, and enable TLS 1.3 with X25519MLKEM768.`
+      : `ML-KEM key-exchange groups are defined only for TLS 1.3. Enable TLS 1.3. ${ENABLE_PQ_KEX}`;
+  return {
+    ...KEX_BASE,
+    severity: noForwardSecrecy || kex?.classicallyWeak ? "high" : "medium",
+    title: noForwardSecrecy
+      ? `RSA key exchange without forward secrecy (${protocol}); no post-quantum key exchange`
+      : `No post-quantum key exchange: ${protocol} negotiated ${kex?.label ?? "a classical key exchange"}`,
+    evidence: kexEvidence(target, result, probes),
+    pq_status: "vulnerable",
+    confidence: "confirmed",
+    ...(kex ? { algorithm: kex.label } : {}),
+    references: kex?.classicallyWeak ? [REFS.hybridKex, REFS.fips203, REFS.sp800131a] : [REFS.hybridKex, REFS.fips203],
+    recommendation,
+  };
+}
+
+function pqKeyExchangeFinding(
+  result: TlsScanResult,
+  target: string,
+  accepted: PqGroup[],
+  probes: GroupProbeResult[],
+): Finding {
+  const names = accepted.map((g) => g.name).join(", ");
+  const allHybrid = accepted.every((g) => g.hybrid);
+  const cnsaKem = accepted.some((g) => g.kem === "ML-KEM-1024");
+  const references: Reference[] = [
+    ...(accepted.some((g) => g.hybrid) ? [REFS.hybridKex, REFS.hybridDesign] : []),
+    ...(allHybrid ? [] : [REFS.mlkemKex]),
+    REFS.fips203,
+    REFS.cnsa2,
+  ];
+  const kems = [...new Set(accepted.map((g) => g.kem))].join(", ");
+  const cnsa = cnsaKem
+    ? "ML-KEM-1024 is available, the key-establishment parameter set CNSA 2.0 specifies."
+    : `Not CNSA 2.0 compliant: CNSA 2.0 specifies ML-KEM-1024, so ${kems} groups are transitional where it applies; add SecP384r1MLKEM1024 or MLKEM1024 there.`;
+  return {
+    ...KEX_BASE,
+    severity: "info",
+    title: `Server supports ${allHybrid ? "hybrid " : ""}post-quantum key exchange (${names})`,
+    evidence: kexEvidence(target, result, probes),
+    pq_status: allHybrid ? "transitional" : "safe",
+    confidence: "confirmed",
+    algorithm: accepted[0]?.name ?? "hybrid-kex",
+    references,
+    recommendation: `Keep it enabled: sessions with clients that offer these groups resist harvest-now-decrypt-later, while clients that do not still get classical key exchange. ${cnsa}`,
+  };
+}
+
+/** TLS 1.3 (or unknown protocol) and no accepted group: say exactly how much was tested. */
+function noPqKeyExchangeFinding(result: TlsScanResult, target: string, probes: GroupProbeResult[]): Finding {
+  const kex = classicalKeyExchange(result);
+  const evidence = kexEvidence(target, result, probes);
+  const rejected = probes.filter((p) => p.outcome === "rejected").map((p) => p.group);
+
+  if (rejected.length > 0) {
+    const untried = PQ_GROUPS.map((g) => g.name).filter((name) => !rejected.includes(name));
     return {
-      ...base,
-      severity: "info",
-      title: `Hybrid post-quantum key exchange negotiated (${result.groupName ?? "hybrid"})`,
-      evidence: `${evidence} ${negotiated}`,
-      pq_status: "transitional",
-      confidence: "high",
-      algorithm: result.groupName ?? "hybrid-kex",
-      references: [REFS.hybridKex, REFS.fips203],
-      recommendation: "Hybrid KEX in place, track migration to standalone ML-KEM once mandated.",
+      ...KEX_BASE,
+      severity: "medium",
+      title: `No tested post-quantum key-exchange group accepted (tried: ${rejected.join(", ")})`,
+      evidence,
+      pq_status: "vulnerable",
+      // Refusals are hard evidence, but only for the groups actually offered.
+      confidence: untried.length === 0 ? "high" : "medium",
+      ...(kex ? { algorithm: kex.label } : {}),
+      references: [REFS.hybridKex, REFS.mlkemKex, REFS.fips203],
+      recommendation:
+        untried.length === 0 ? ENABLE_PQ_KEX : `${ENABLE_PQ_KEX} Not conclusively tested: ${untried.join(", ")}.`,
     };
   }
-  if (result.groupName) {
+  if (probes.length > 0 && probes.every((p) => p.outcome === "untestable")) {
     return {
-      ...base,
-      severity: "medium",
-      title: "No hybrid post-quantum key exchange negotiated",
-      evidence: `${evidence} group=${result.groupName}`,
-      pq_status: "vulnerable",
-      confidence: "high",
-      algorithm: result.groupName,
+      ...KEX_BASE,
+      severity: "info",
+      title: "Post-quantum key exchange not tested: the local TLS runtime lacks ML-KEM groups",
+      evidence,
+      pq_status: "unknown",
+      confidence: "low",
       references: [REFS.hybridKex, REFS.fips203],
       recommendation:
-        "Enable X25519MLKEM768 so session keys resist harvest-now-decrypt-later attacks.",
+        "A limit of the scanning machine, not a verdict on the server. Re-run on a Node.js build whose OpenSSL is 3.5 or later (see process.versions.openssl) to probe the ML-KEM groups.",
+    };
+  }
+  if (kex) {
+    // Only the group this client was given, not what the server could do.
+    return {
+      ...KEX_BASE,
+      severity: "medium",
+      title: "No post-quantum key exchange negotiated",
+      evidence,
+      pq_status: "vulnerable",
+      confidence: "medium",
+      algorithm: kex.label,
+      references: [REFS.hybridKex, REFS.fips203],
+      recommendation: ENABLE_PQ_KEX,
     };
   }
   return {
-    ...base,
+    ...KEX_BASE,
     severity: "info",
-    title: "Hybrid post-quantum key-exchange support could not be determined",
+    title: "Post-quantum key-exchange support could not be determined",
     evidence,
     pq_status: "unknown",
     confidence: "low",
     references: [REFS.hybridKex],
-    recommendation:
-      "Could not determine hybrid support; confirm whether X25519MLKEM768 is enabled server-side.",
+    recommendation: "Could not determine post-quantum key-exchange support; confirm server-side whether X25519MLKEM768 is enabled.",
   };
+}
+
+function evaluateKeyExchange(result: TlsScanResult, target: string): Finding {
+  const probes = probeResults(result);
+  if (result.protocol && result.protocol !== "TLSv1.3") return preTls13KeyExchange(result, target, probes);
+  const accepted = acceptedGroups(result, probes);
+  if (accepted.length > 0) return pqKeyExchangeFinding(result, target, accepted, probes);
+  return noPqKeyExchangeFinding(result, target, probes);
 }
 
 /** Analyze a completed handshake and return findings. Pure, drives the tests. */
@@ -714,10 +973,12 @@ export function analyzeTls(
   const chainFinding = evaluateChain(result.chain);
   if (chainFinding) findings.push(chainFinding);
   findings.push(...evaluateIntermediateSignatures(result.chain, target));
+  const trustFinding = evaluateChainTrust(result, target);
+  if (trustFinding) findings.push(trustFinding);
 
-  const protocolFinding = evaluateProtocol(result.protocol, target);
+  const protocolFinding = evaluateProtocol(result, target);
   if (protocolFinding) findings.push(protocolFinding);
-  findings.push(evaluateHybridKex(result, target));
+  findings.push(evaluateKeyExchange(result, target));
 
   // Network findings have no file path; the host/port IS their location, and
   // SARIF consumers drop results that carry none.
@@ -725,6 +986,8 @@ export function analyzeTls(
 
   return findings;
 }
+
+// --- Network -----------------------------------------------------------------
 
 function collectChain(leaf: DetailedPeerCertificate): CertInfo[] {
   const chain: CertInfo[] = [];
@@ -745,109 +1008,175 @@ function collectChain(leaf: DetailedPeerCertificate): CertInfo[] {
   return chain;
 }
 
-/** Perform the primary handshake and read the certificate chain and parameters. */
-function handshake(host: string, port: number, timeoutMs: number): Promise<Omit<TlsScanResult, "hybridKex">> {
+const localGroupSupport = new Map<string, boolean>();
+
+/** Does the local OpenSSL implement a key-exchange group? Unknown names make it throw. */
+function locallySupported(group: string): boolean {
+  let supported = localGroupSupport.get(group);
+  if (supported === undefined) {
+    try {
+      createSecureContext({ ecdhCurve: group });
+      supported = true;
+    } catch {
+      supported = false;
+    }
+    localGroupSupport.set(group, supported);
+  }
+  return supported;
+}
+
+function connectOptions(host: string, port: number): ConnectionOptions {
+  return {
+    host,
+    port,
+    // SNI must be a hostname; Node rejects an IP literal as servername.
+    ...(isIP(host) ? {} : { servername: host }),
+    rejectUnauthorized: false,
+  };
+}
+
+function errorCode(err: unknown): string | undefined {
+  const code: unknown = err && typeof err === "object" && "code" in err ? err.code : undefined;
+  return typeof code === "string" ? code : undefined;
+}
+
+function isTlsLayerError(err: unknown): boolean {
+  return errorCode(err)?.startsWith("ERR_SSL_") ?? false;
+}
+
+/** Open a TLS connection and resolve once the handshake completes; the caller ends the socket. */
+function openTls(options: ConnectionOptions, timeoutMs: number): Promise<TLSSocket> {
   return new Promise((resolve, reject) => {
-    const socket = tlsConnect(
-      {
-        host,
-        port,
-        // SNI must be a hostname; Node rejects an IP literal as servername.
-        ...(isIP(host) ? {} : { servername: host }),
-        rejectUnauthorized: false,
-        ALPNProtocols: ["h2", "http/1.1"],
-      },
-      () => {
-        try {
-          const detailed = socket.getPeerCertificate(true);
-          const cipher = socket.getCipher();
-          const ephemeral = socket.getEphemeralKeyInfo();
-          const groupName =
-            ephemeral && typeof ephemeral === "object" && "name" in ephemeral
-              ? ((ephemeral as { name?: string }).name ?? null)
-              : null;
-          const result: Omit<TlsScanResult, "hybridKex"> = {
-            protocol: socket.getProtocol(),
-            cipherName: cipher?.name ?? null,
-            groupName,
-            chain: collectChain(detailed),
-          };
-          socket.end();
-          resolve(result);
-        } catch (err) {
-          socket.destroy();
-          reject(err instanceof Error ? err : new Error(String(err)));
-        }
-      },
-    );
-    socket.once("error", reject);
+    let socket: TLSSocket;
+    try {
+      socket = tlsConnect(options, () => {
+        socket.setTimeout(0);
+        resolve(socket);
+      });
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+    socket.on("error", (err) => {
+      socket.destroy();
+      reject(err);
+    });
     socket.setTimeout(timeoutMs, () => {
-      socket.destroy(new Error(`TLS handshake to ${host}:${port} timed out after ${timeoutMs}ms`));
+      const message = `TLS handshake to ${options.host ?? "host"}:${options.port ?? ""} timed out after ${timeoutMs}ms`;
+      socket.destroy(Object.assign(new Error(message), { code: "ETIMEDOUT" }));
     });
   });
+}
+
+/** The negotiated group name and ephemeral key size, as far as the runtime reports them. */
+function ephemeralKey(socket: TLSSocket): { name: string | null; size: number | null } {
+  const info: unknown = socket.getEphemeralKeyInfo();
+  if (!info || typeof info !== "object") return { name: null, size: null };
+  const { name, size } = info as { name?: unknown; size?: unknown };
+  return { name: typeof name === "string" ? name : null, size: typeof size === "number" ? size : null };
+}
+
+function authorizationFailure(socket: TLSSocket): string | null {
+  if (socket.authorized) return null;
+  const reason: unknown = socket.authorizationError;
+  if (typeof reason === "string") return reason;
+  return reason instanceof Error ? reason.message : "unverified";
+}
+
+type HandshakeResult = Omit<TlsScanResult, "hybridKex" | "groupProbes">;
+
+async function readHandshake(
+  host: string,
+  port: number,
+  timeoutMs: number,
+  offer: ConnectionOptions,
+): Promise<HandshakeResult> {
+  const options = { ...connectOptions(host, port), ALPNProtocols: ["h2", "http/1.1"], ...offer };
+  const socket = await openTls(options, timeoutMs);
+  try {
+    const ephemeral = ephemeralKey(socket);
+    return {
+      protocol: socket.getProtocol(),
+      cipherName: socket.getCipher()?.name ?? null,
+      groupName: ephemeral.name,
+      groupBits: ephemeral.size,
+      authorizationError: authorizationFailure(socket),
+      chain: collectChain(socket.getPeerCertificate(true)),
+    };
+  } finally {
+    socket.end();
+  }
 }
 
 /**
- * Actively probe whether the server will negotiate the standardized hybrid
- * post-quantum group. We attempt a handshake restricted to X25519MLKEM768: a
- * clean completion proves support; a TLS-level rejection proves the server
- * refused it; a network error (or an OpenSSL that doesn't know the group) is
- * inconclusive. We never conclude "unsupported" from an ambiguous failure.
+ * Perform the primary handshake and read the certificate chain and parameters.
+ * A server that refuses a modern offer at the TLS layer gets one retry with the
+ * legacy offer, so a TLS 1.0 server is reported rather than aborting the scan.
  */
-function probeHybridSupport(host: string, port: number, timeoutMs: number): Promise<HybridSupport> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const done = (value: HybridSupport): void => {
-      if (!settled) {
-        settled = true;
-        resolve(value);
-      }
-    };
-    let socket: ReturnType<typeof tlsConnect>;
-    try {
-      socket = tlsConnect(
-        {
-          host,
-          port,
-          ...(isIP(host) ? {} : { servername: host }),
-          rejectUnauthorized: false,
-          ecdhCurve: HYBRID_GROUP,
-        },
-        () => {
-          done("supported");
-          socket.end();
-        },
-      );
-    } catch {
-      // Local OpenSSL does not know the group name, cannot probe.
-      done("unknown");
-      return;
-    }
-    socket.once("error", (err: NodeJS.ErrnoException) => {
-      const code = err.code ?? "";
-      const message = err.message ?? String(err);
-      if (/^(ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE)$/.test(code)) {
-        done("unknown"); // transport-level problem, inconclusive
-      } else if (/ERR_SSL|handshake|alert|curve|group|no protocols|version|unsupported/i.test(`${code} ${message}`)) {
-        done("unsupported"); // server actively refused the hybrid group
-      } else {
-        done("unknown");
-      }
-      socket.destroy();
-    });
-    socket.setTimeout(timeoutMs, () => {
-      done("unknown");
-      socket.destroy();
-    });
-  });
+async function handshake(host: string, port: number, timeoutMs: number): Promise<HandshakeResult> {
+  const groups = PRIMARY_HANDSHAKE_GROUPS.filter(locallySupported).join(":");
+  const modern: ConnectionOptions = groups ? { ecdhCurve: groups } : {};
+  try {
+    return await readHandshake(host, port, timeoutMs, modern);
+  } catch (err) {
+    if (!isTlsLayerError(err)) throw err;
+    const legacy = await readHandshake(host, port, timeoutMs, { ...modern, ...LEGACY_OFFER }).catch(() => null);
+    if (!legacy) throw err;
+    return { ...legacy, legacyHandshake: true };
+  }
+}
+
+/**
+ * Offer exactly one group over TLS 1.3 only. It counts as accepted only when
+ * the handshake completes as TLS 1.3 and the runtime names that group as the
+ * negotiated one: without `minVersion` a TLS 1.2 server would complete a
+ * classical handshake (even static RSA) and pass as post-quantum.
+ */
+async function probeGroup(
+  host: string,
+  port: number,
+  timeoutMs: number,
+  group: string,
+): Promise<GroupProbeResult> {
+  if (!locallySupported(group)) {
+    const openssl = process.versions.openssl ?? "(unknown version)";
+    return { group, outcome: "untestable", detail: `local OpenSSL ${openssl} lacks it` };
+  }
+  let socket: TLSSocket;
+  try {
+    socket = await openTls({ ...connectOptions(host, port), minVersion: "TLSv1.3", ecdhCurve: group }, timeoutMs);
+  } catch (err) {
+    const code = errorCode(err) ?? (err instanceof Error ? err.message : String(err));
+    // The primary handshake shows the host speaks TLS, so a TLS-layer failure
+    // while offering only this group is a refusal. Transport errors prove nothing.
+    return { group, outcome: isTlsLayerError(err) ? "rejected" : "inconclusive", detail: code };
+  }
+  const protocol = socket.getProtocol();
+  const negotiated = ephemeralKey(socket).name;
+  socket.end();
+  if (protocol === "TLSv1.3" && negotiated?.toLowerCase() === group.toLowerCase()) {
+    return { group, outcome: "accepted" };
+  }
+  return {
+    group,
+    outcome: "inconclusive",
+    detail: `completed as ${protocol ?? "unknown protocol"} with group ${negotiated ?? "not reported by this runtime"}`,
+  };
+}
+
+function summarizeProbes(probes: GroupProbeResult[]): HybridSupport {
+  if (probes.some((p) => p.outcome === "accepted")) return "supported";
+  if (probes.some((p) => p.outcome === "rejected")) return "unsupported";
+  return "unknown";
 }
 
 const defaultProbe: TlsProbe = async (host, port, timeoutMs) => {
-  const [base, hybridKex] = await Promise.all([
+  const probeTimeout = Math.min(timeoutMs, PROBE_TIMEOUT_CAP_MS);
+  const [base, groupProbes] = await Promise.all([
     handshake(host, port, timeoutMs),
-    probeHybridSupport(host, port, Math.min(timeoutMs, 8000)),
+    Promise.all(PQ_GROUPS.map((g) => probeGroup(host, port, probeTimeout, g.name))),
   ]);
-  return { ...base, hybridKex };
+  return { ...base, hybridKex: summarizeProbes(groupProbes), groupProbes };
 };
 
 /** Scan a host's TLS posture and return findings. */

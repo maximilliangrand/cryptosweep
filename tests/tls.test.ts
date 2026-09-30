@@ -227,7 +227,10 @@ describe("analyzeTls", () => {
     );
     expect(unsupported.pq_status).toBe("vulnerable");
     expect(unsupported.severity).toBe("medium");
-    expect(unsupported.confidence).toBe("confirmed");
+    // The aggregate verdict covers X25519MLKEM768 alone; one refused group is
+    // not proof that no post-quantum group is available.
+    expect(unsupported.confidence).toBe("medium");
+    expect(unsupported.title).toContain("tried: X25519MLKEM768");
   });
 });
 
