@@ -64,23 +64,137 @@ const DEFAULT_IGNORE_DIRS = new Set([
 const DEFAULT_MAX_FILE_BYTES = 2_000_000;
 
 const WEAK_HASH = /\bcreateHash\s*\(\s*["'`](md5|sha-?1)["'`]/gi;
-const WEAK_CIPHER =
-  /\bcreate(?:Cipher|Decipher)(?:iv)?\s*\(\s*["'`]([a-z0-9_-]*(?:des|rc4|rc2)[a-z0-9_-]*)["'`]/gi;
+/** The cipher name is captured with a bounded class and tested separately, keeping the match linear. */
+const WEAK_CIPHER = /\bcreate(?:Cipher|Decipher)(?:iv)?\s*\(\s*["'`]([a-z0-9_-]{1,64})["'`]/gi;
+const WEAK_CIPHER_NAME = /des|rc4|rc2/i;
 const JWT_ALG = /["'`](HS256|HS384|HS512|RS256|RS384|RS512|ES256|ES384|ES512|PS256|PS384|PS512|EdDSA|none)["'`]/g;
 const JWT_USAGE = /jsonwebtoken|\bjwt\s*\.\s*(?:sign|verify|decode)/i;
-/**
- * A private-key block is only flagged when it has a real base64 body between the
- * BEGIN/END markers. A bare header or a `...`-elided snippet (as in READMEs and
- * docs) does not match, that alone kills the most common false critical.
- *
- * The optional RFC 1421 header block (`Proc-Type: 4,ENCRYPTED` / `DEK-Info: …`)
- * must be skipped explicitly: passphrase-protected keys are the most common
- * committed-key form in the wild, precisely because developers believe the
- * passphrase makes committing them safe.
- */
-const PRIVATE_KEY =
-  /-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY-----[\r\n]+(?:[A-Za-z][\w-]*:[^\r\n]*[\r\n]+)*[\r\n]*[A-Za-z0-9+/=\r\n]{40,}-----END/g;
 const PUBLIC_KEY = /-----BEGIN (?:RSA )?PUBLIC KEY-----/g;
+
+/**
+ * Private-key PEM armor. Only the BEGIN marker is a regex; the body is checked
+ * by {@link readPemBody}, one bounded forward scan. The old all-in-one pattern
+ * had three overlapping newline quantifiers and backtracked cubically: a 6 KB
+ * file of newlines after a BEGIN marker hung the scanner.
+ *
+ * A block is only flagged when it has a real base64 body before the END marker.
+ * A bare header or a `...`-elided snippet (as in READMEs and docs) does not
+ * count, which alone kills the most common false critical. RFC 1421 headers
+ * (`Proc-Type: 4,ENCRYPTED` / `DEK-Info: …`) are skipped explicitly:
+ * passphrase-protected keys are the most common committed-key form, precisely
+ * because developers believe the passphrase makes committing them safe.
+ */
+const PRIVATE_KEY_BEGIN = /-----BEGIN (?:(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----/g;
+/** A PEM body longer than this is not a key (a 16384-bit RSA key is about 13 KB). */
+const PEM_MAX_BODY_CHARS = 64 * 1024;
+/** Armor headers (`Proc-Type:`, `DEK-Info:`, OpenPGP `Version:`) allowed before the body. */
+const PEM_MAX_HEADER_LINES = 16;
+const PEM_MAX_HEADER_CHARS = 1024;
+/** Bodies shorter than this are elisions, not keys. */
+const PEM_MIN_BASE64_CHARS = 40;
+
+function isAsciiLetter(code: number): boolean {
+  return (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a);
+}
+
+function isAsciiDigit(code: number): boolean {
+  return code >= 0x30 && code <= 0x39;
+}
+
+function isBase64Char(code: number): boolean {
+  return isAsciiLetter(code) || isAsciiDigit(code) || code === 0x2b || code === 0x2f || code === 0x3d; // + / =
+}
+
+/** `Name: value`, where Name is a letter followed by word characters or dashes. */
+function isArmorHeader(content: string, start: number, end: number): boolean {
+  if (end - start > PEM_MAX_HEADER_CHARS || !isAsciiLetter(content.charCodeAt(start))) return false;
+  for (let i = start + 1; i < end; i += 1) {
+    const c = content.charCodeAt(i);
+    if (c === 0x3a) return true; // ':'
+    if (!isAsciiLetter(c) && !isAsciiDigit(c) && c !== 0x5f && c !== 0x2d) return false;
+  }
+  return false;
+}
+
+/**
+ * End of the line starting at `pos` (exclusive) and the start of the next.
+ * A JSON-escaped `\n` also ends a line, so a key inside a service-account JSON
+ * file (`"-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END..."`) is seen.
+ */
+function lineBounds(content: string, pos: number, limit: number): { end: number; next: number } {
+  for (let i = pos; i < limit; i += 1) {
+    const c = content.charCodeAt(i);
+    if (c === 0x0a) return { end: i, next: i + 1 };
+    if (c === 0x0d) return { end: i, next: content.charCodeAt(i + 1) === 0x0a ? i + 2 : i + 1 };
+    if (c === 0x5c) {
+      const escaped = content.charCodeAt(i + 1);
+      if (escaped === 0x6e) return { end: i, next: i + 2 }; // \n
+      if (escaped === 0x72) {
+        const crlf = content.charCodeAt(i + 2) === 0x5c && content.charCodeAt(i + 3) === 0x6e;
+        return { end: i, next: crlf ? i + 4 : i + 2 }; // \r or \r\n
+      }
+    }
+  }
+  return { end: limit, next: limit };
+}
+
+function isBlank(code: number): boolean {
+  return code === 0x20 || code === 0x09;
+}
+
+/**
+ * Validate the PEM body that starts at `start` (just past the BEGIN marker):
+ * optional armor headers, blank lines and indentation, then only base64 up to
+ * a `-----END` marker. Each character is visited at most twice and the scan is
+ * capped at {@link PEM_MAX_BODY_CHARS}, so the cost is linear on any input.
+ *
+ * Returns the base64 lines of a well-formed body, otherwise null.
+ */
+function readPemBody(content: string, start: number): string[] | null {
+  const limit = Math.min(content.length, start + PEM_MAX_BODY_CHARS);
+  const lines: string[] = [];
+  let base64Chars = 0;
+  let headers = 0;
+  let inHeaders = true;
+  let pos = start;
+  while (pos < limit) {
+    const { end, next } = lineBounds(content, pos, limit);
+    let s = pos;
+    let e = end;
+    pos = next;
+    while (s < e && isBlank(content.charCodeAt(s))) s += 1;
+    while (e > s && isBlank(content.charCodeAt(e - 1))) e -= 1;
+    if (s === e) continue;
+    if (inHeaders && isArmorHeader(content, s, e)) {
+      headers += 1;
+      if (headers > PEM_MAX_HEADER_LINES) return null;
+      continue;
+    }
+    inHeaders = false;
+    for (let i = s; i < e; i += 1) {
+      const c = content.charCodeAt(i);
+      if (isBase64Char(c)) {
+        base64Chars += 1;
+      } else if (c === 0x2d && content.startsWith("-----END", i)) {
+        if (i > s) lines.push(content.slice(s, i));
+        return base64Chars >= PEM_MIN_BASE64_CHARS ? lines : null;
+      } else {
+        return null;
+      }
+    }
+    lines.push(content.slice(s, e));
+  }
+  return null;
+}
+
+/** Offsets of every private-key PEM block that carries a real base64 body. */
+function findPrivateKeyBlocks(content: string): number[] {
+  const offsets: number[] = [];
+  for (const { index, match } of matchAll(content, PRIVATE_KEY_BEGIN)) {
+    if (readPemBody(content, index + match[0].length) !== null) offsets.push(index);
+  }
+  return offsets;
+}
 
 /**
  * Where a match was found. A weak primitive in a real source file is a live code
@@ -138,12 +252,28 @@ class IdAllocator {
   }
 }
 
-function lineNumber(content: string, index: number): number {
-  let line = 1;
-  for (let i = 0; i < index && i < content.length; i += 1) {
-    if (content.charCodeAt(i) === 0x0a) line += 1;
+/**
+ * 1-based line lookup. Newline offsets are computed once per file and each
+ * query is a binary search; rescanning from offset 0 for every finding was
+ * quadratic and let one hostile file pin the CPU for minutes.
+ */
+class LineIndex {
+  private readonly starts: number[] = [0];
+
+  constructor(content: string) {
+    for (let i = content.indexOf("\n"); i !== -1; i = content.indexOf("\n", i + 1)) this.starts.push(i + 1);
   }
-  return line;
+
+  lineOf(offset: number): number {
+    let lo = 0;
+    let hi = this.starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if ((this.starts[mid] ?? 0) <= offset) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo + 1;
+  }
 }
 
 function* matchAll(
@@ -162,17 +292,19 @@ function* matchAll(
 export function scanContent(relPath: string, content: string, ids = new IdAllocator()): Finding[] {
   const findings: Finding[] = [];
   const context = classifyFile(relPath);
-  const at = (index: number): string => `${relPath}:${lineNumber(content, index)}`;
+  let lines: LineIndex | null = null;
+  const lineOf = (index: number): number => (lines ??= new LineIndex(content)).lineOf(index);
 
   const push: PushFinding = (prefix, baseSeverity, category, title, index, pq, recommendation, opts = {}) => {
     const { severity, confidence } = calibrate(baseSeverity, context, opts.tier);
+    const line = lineOf(index);
     findings.push({
       id: ids.next(prefix),
       severity,
       category,
       title,
-      evidence: at(index),
-      location: { path: relPath, line: lineNumber(content, index) },
+      evidence: `${relPath}:${line}`,
+      location: { path: relPath, line },
       pq_status: pq,
       confidence,
       algorithm: opts.algorithm,
@@ -202,6 +334,7 @@ export function scanContent(relPath: string, content: string, ids = new IdAlloca
     }
 
     for (const { index, match } of matchAll(content, WEAK_CIPHER)) {
+      if (!WEAK_CIPHER_NAME.test(match[1] ?? "")) continue;
       push(
         "SRC",
         "high",
@@ -226,7 +359,7 @@ export function scanContent(relPath: string, content: string, ids = new IdAlloca
   // PEM keys always run in both paths (a key in a comment is still a leak). When
   // the AST ran, a key sitting inside a real string/template literal is upgraded
   // from `high` to `confirmed`.
-  for (const { index } of matchAll(content, PRIVATE_KEY)) {
+  for (const index of findPrivateKeyBlocks(content)) {
     const inLiteral = ast.used === "ast" && ast.stringRanges.some(([s, e]) => index >= s && index < e);
     push(
       "KEY",

@@ -9,14 +9,35 @@ import type { ParsedDep } from "./npm";
 const PEP508_NAME = /^([A-Za-z0-9][A-Za-z0-9._-]*)/;
 const VERSION_OP = /(==|~=|>=|<=|!=|>|<|===)/;
 
+/**
+ * Cut a trailing `# comment`: a `#` at the start or after whitespace (a URL
+ * fragment such as `#egg=` has none). A linear scan; the old `split(/\s+#/)`
+ * backtracked quadratically over a long run of spaces.
+ */
+function stripComment(spec: string): string {
+  for (let i = spec.indexOf("#"); i !== -1; i = spec.indexOf("#", i + 1)) {
+    const before = spec.charCodeAt(i - 1);
+    if (i === 0 || before === 0x20 || before === 0x09) return spec.slice(0, i);
+  }
+  return spec;
+}
+
+/** Drop the first `[extras]` group, found with indexOf so a run of `[` stays linear. */
+function stripExtras(spec: string): string {
+  const open = spec.indexOf("[");
+  if (open < 0) return spec;
+  const close = spec.indexOf("]", open);
+  return close < 0 ? spec : spec.slice(0, open) + spec.slice(close + 1);
+}
+
 function splitNameVersion(spec: string): { name: string; version: string } | null {
   const trimmed = spec.trim();
   if (!trimmed || trimmed.startsWith("#")) return null;
   // Strip line comments after the spec (`pkg==1.0  # comment`).
-  const noComment = trimmed.split(/\s+#/)[0]?.trim() ?? "";
+  const noComment = stripComment(trimmed).trim();
   if (!noComment) return null;
   // Strip extras: `pkg[extra1,extra2]==1.0`.
-  const noExtras = noComment.replace(/\[[^\]]*\]/, "");
+  const noExtras = stripExtras(noComment);
   // Strip environment markers: `pkg==1.0 ; python_version < "3.11"`.
   const noMarker = noExtras.split(";")[0]?.trim() ?? "";
   if (!noMarker) return null;

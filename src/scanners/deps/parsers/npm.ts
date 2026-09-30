@@ -61,6 +61,14 @@ export function parsePackageJson(content: string, manifestPath: string): ParsedD
 }
 
 /**
+ * An indented `name@version:` or `/name@version:` key (the leading slash is the
+ * older pnpm style; @-prefixed names need a second @). Applied to one line at a
+ * time with `[ \t]` indentation: the old multiline `^\s{2,}` also consumed
+ * newlines and backtracked quadratically over a run of blank lines.
+ */
+const PNPM_KEY = /^[ \t]{2,}\/?((?:@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*)@([^\s'"():]+):[ \t]*$/i;
+
+/**
  * Parse a `pnpm-lock.yaml` file. Extracts resolved `name@version` pairs from
  * either the v6/v7 `packages: /name@version:` form or the v9 `name@version:`
  * form. Scoped packages (e.g. `@scope/pkg`) are handled.
@@ -68,11 +76,9 @@ export function parsePackageJson(content: string, manifestPath: string): ParsedD
 export function parsePnpmLock(content: string, manifestPath: string): ParsedDep[] {
   const seen = new Set<string>();
   const deps: ParsedDep[] = [];
-  // Match indented `keys` that look like `name@version:` or `/name@version:`.
-  // The leading slash is the older pnpm style; @-prefixed names need a second @.
-  const re = /^\s{2,}\/?((?:@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*)@([^\s'"():]+):\s*$/gim;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(content)) !== null) {
+  for (const line of content.split("\n")) {
+    const m = PNPM_KEY.exec(line.endsWith("\r") ? line.slice(0, -1) : line);
+    if (!m) continue;
     const name = m[1];
     const version = m[2];
     if (!name || !version) continue;
