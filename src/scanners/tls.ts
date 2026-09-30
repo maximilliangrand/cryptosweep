@@ -17,7 +17,6 @@ import { connect as tlsConnect, createSecureContext } from "node:tls";
 import type { ConnectionOptions, DetailedPeerCertificate, TLSSocket } from "node:tls";
 import { isIP } from "node:net";
 import type { LookupFunction } from "node:net";
-import { lookup as dnsLookup } from "node:dns/promises";
 import type { LookupAddress } from "node:dns";
 import { X509Certificate } from "node:crypto";
 import { certificateSignatureOid, signatureAlgorithmName } from "../asn1";
@@ -34,8 +33,18 @@ import {
   toKeyType,
 } from "../crypto";
 import type { KeyType } from "../crypto";
-import { isBlockedAddress } from "../net-guard";
-import type { Confidence, Finding, Location, PqStatus, Reference, Severity } from "../report";
+import { resolveAllowedAddress } from "../net-guard";
+import type {
+  CertificateDetails,
+  Confidence,
+  CryptoUsage,
+  Finding,
+  Location,
+  PqStatus,
+  ProtocolDetails,
+  Reference,
+  Severity,
+} from "../report";
 
 export type { KeyType } from "../crypto";
 
@@ -413,6 +422,20 @@ function keyDescription(cert: CertInfo): string {
   return keyAlgorithmLabel(cert.keyType, cert.keyBits, cert.curve);
 }
 
+/** A parsed certificate as the report carries it, so the CBOM can inventory it with its links. */
+function certificateDetails(cert: CertInfo): CertificateDetails {
+  return {
+    subject: cert.subject,
+    issuer: cert.issuer,
+    notValidBefore: cert.validFrom,
+    notValidAfter: cert.validTo,
+    signatureAlgorithm: cert.signatureAlgorithm,
+    ...(cert.signatureOid ? { signatureOid: cert.signatureOid } : {}),
+    publicKey: keyAlgorithmLabel(cert.keyType, cert.keyBits, cert.curve),
+    ...(cert.keyBits !== null ? { publicKeyBits: cert.keyBits } : {}),
+  };
+}
+
 /** Classify a certificate signature algorithm's post-quantum posture. */
 function signaturePosture(name: string): {
   severity: Severity;
@@ -561,6 +584,7 @@ function evaluateChain(chain: CertInfo[]): Finding | null {
       .join(" → "),
     pq_status: classical > 0 ? "vulnerable" : unknown > 0 ? "unknown" : "safe",
     confidence: unknown === 0 ? "confirmed" : "high",
+    certificates: intermediates.map(certificateDetails),
     references: [REFS.fips204, REFS.cnsa2],
     recommendation:
       classical > 0
@@ -592,6 +616,8 @@ function evaluateIntermediateSignatures(chain: CertInfo[], target: string): Find
         pq_status: sig.pq_status,
         confidence: sig.confidence,
         algorithm: cert.signatureAlgorithm,
+        ...(cert.signatureOid ? { oid: cert.signatureOid } : {}),
+        certificates: [certificateDetails(cert)],
         references: sig.references,
         recommendation: sig.recommendation,
       },
@@ -620,6 +646,17 @@ function evaluateChainTrust(result: TlsScanResult, target: string): Finding | nu
 const PROTOCOL_SCOPE =
   "Not assessed: other protocol versions and cipher suites the server may also accept (only the ones negotiated for this client offer were observed).";
 
+/** The negotiated session in structured form: `TLSv1.3` becomes version `1.3`, `TLSv1` becomes `1.0`. */
+function protocolDetails(result: TlsScanResult): ProtocolDetails {
+  const version = /^TLSv(\d)(?:\.(\d))?$/.exec(result.protocol ?? "");
+  return {
+    type: "tls",
+    ...(version ? { version: `${version[1] ?? ""}.${version[2] ?? "0"}` } : {}),
+    ...(result.cipherName ? { cipherSuite: result.cipherName } : {}),
+    ...(result.groupName ? { group: result.groupName } : {}),
+  };
+}
+
 function evaluateProtocol(result: TlsScanResult, target: string): Finding | null {
   const protocol = result.protocol;
   if (!protocol) return null;
@@ -636,6 +673,7 @@ function evaluateProtocol(result: TlsScanResult, target: string): Finding | null
     category: "tls" as const,
     evidence,
     confidence: "confirmed" as const,
+    protocol: protocolDetails(result),
     references: [REFS.hybridKex, REFS.mlkemKex],
   };
 
@@ -917,6 +955,16 @@ function evaluateKeyExchange(result: TlsScanResult, target: string): Finding {
   return noPqKeyExchangeFinding(result, target, probes);
 }
 
+/**
+ * What the leaf key does in this session. It authenticates the handshake,
+ * except under static RSA key transport, where it also decrypts the premaster
+ * secret: then recorded sessions fall with the key, a harvest-now exposure.
+ */
+function leafKeyUsage(result: TlsScanResult): CryptoUsage[] {
+  const keyTransport = result.protocol !== "TLSv1.3" && classicalKeyExchange(result)?.forwardSecret === false;
+  return keyTransport ? ["encryption", "authentication"] : ["authentication"];
+}
+
 /** Analyze a completed handshake and return findings. Pure, drives the tests. */
 export function analyzeTls(
   result: TlsScanResult,
@@ -952,6 +1000,8 @@ export function analyzeTls(
       pq_status: posture.pq_status,
       confidence: leaf.keyType === "unknown" ? "low" : "confirmed",
       algorithm: keyAlgorithmLabel(leaf.keyType, leaf.keyBits, leaf.curve),
+      ...(leaf.keyOid ? { oid: leaf.keyOid } : {}),
+      usage: leafKeyUsage(result),
       references: posture.references,
       recommendation: leafKeyRecommendation(leaf, posture.pq_status),
     });
@@ -967,6 +1017,8 @@ export function analyzeTls(
       pq_status: sig.pq_status,
       confidence: sig.confidence,
       algorithm: leaf.signatureAlgorithm,
+      ...(leaf.signatureOid ? { oid: leaf.signatureOid } : {}),
+      certificates: [certificateDetails(leaf)],
       references: sig.references,
       recommendation: sig.recommendation,
     });
@@ -1023,39 +1075,15 @@ interface ResolvedTarget {
 }
 
 /**
- * Resolve `host` once and vet every address it resolves to.
- *
- * Fails closed: a lookup error refuses the scan instead of letting a later
- * connect resolve the name on its own, and one blocked address refuses the
- * whole name, since the kernel may connect to any of them.
+ * Resolve `host` once through the shared SSRF guard, which fails closed on a
+ * lookup error, a non-IP answer or a non-canonical numeric host, and refuses
+ * the whole name if any one address is blocked (the kernel may connect to any
+ * of them). Every connection then goes to one of these addresses.
  */
 async function resolveTarget(host: string, allowPrivate: boolean): Promise<ResolvedTarget> {
   const bare = host.replace(/^\[(.*)\]$/, "$1"); // strip IPv6 brackets
-  const family = isIP(bare);
-  if (family !== 0) {
-    if (!allowPrivate && isBlockedAddress(bare)) throw new Error(`Refusing to scan non-public address: ${host}`);
-    return { host: bare, addresses: [{ address: bare, family }] };
-  }
-
-  let addresses: LookupAddress[];
-  try {
-    addresses = await dnsLookup(bare, { all: true });
-  } catch (err) {
-    const code = errorCode(err) ?? "lookup failed";
-    throw new Error(`Could not resolve ${host} (${code}); refusing to scan a name that did not resolve.`, {
-      cause: err,
-    });
-  }
-  if (addresses.length === 0 || addresses.some((a) => isIP(a.address) === 0)) {
-    throw new Error(`Could not resolve ${host} to a usable address; refusing to scan it.`);
-  }
-  const blocked = allowPrivate ? undefined : addresses.find((a) => isBlockedAddress(a.address));
-  if (blocked) {
-    throw new Error(
-      `Refusing to scan ${host}: resolves to non-public address ${blocked.address}. Pass --allow-private to override.`,
-    );
-  }
-  return { host: bare, servername: bare, addresses };
+  const addresses = await resolveAllowedAddress(bare, allowPrivate);
+  return isIP(bare) === 0 ? { host: bare, servername: bare, addresses } : { host: bare, addresses };
 }
 
 /**

@@ -73,7 +73,7 @@ describe("TLS target resolution", () => {
     vettedLookup.mockRejectedValue(Object.assign(new Error("queryA ENOTFOUND rebind.test"), { code: "ENOTFOUND" }));
     const connectTimeLookup = vi.spyOn(dns, "lookup");
 
-    await expect(scanTls("rebind.test", { port, timeoutMs: 5000 })).rejects.toThrow(/Could not resolve rebind\.test \(ENOTFOUND\)/);
+    await expect(scanTls("rebind.test", { port, timeoutMs: 5000 })).rejects.toThrow(/Refusing to scan rebind\.test: DNS resolution failed \(ENOTFOUND\)/);
     expect(connectTimeLookup).not.toHaveBeenCalled();
     expect(connections).toBe(0);
   });
@@ -91,7 +91,7 @@ describe("TLS target resolution", () => {
 
   it("refuses a resolver answer that is not an IP address", async () => {
     vettedLookup.mockResolvedValue([{ address: "internal.corp", family: 0 }]);
-    await expect(scanTls("rebind.test", { port, timeoutMs: 5000 })).rejects.toThrow(/usable address/);
+    await expect(scanTls("rebind.test", { port, timeoutMs: 5000 })).rejects.toThrow(/not a usable IP address/);
     expect(connections).toBe(0);
   });
 

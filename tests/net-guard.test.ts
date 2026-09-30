@@ -184,6 +184,17 @@ describe("resolveAllowedAddress", () => {
     await expect(resolveAllowedAddress("empty.example", true)).rejects.toThrow(/no addresses/);
   });
 
+  it("refuses a resolver answer that is not an IP address, even when private targets are allowed", async () => {
+    dns.lookup.mockResolvedValue([{ address: "internal.corp", family: 0 }]);
+    await expect(resolveAllowedAddress("odd.example")).rejects.toThrow(/not a usable IP address \(internal\.corp\)/);
+    await expect(resolveAllowedAddress("odd.example", true)).rejects.toThrow(/not a usable IP address/);
+  });
+
+  it("reports the family of each answer from the address itself", async () => {
+    dns.lookup.mockResolvedValue([{ address: "2606:4700::1111", family: 0 }]);
+    await expect(resolveAllowedAddress("v6.example")).resolves.toEqual([{ address: "2606:4700::1111", family: 6 }]);
+  });
+
   it("refuses non-canonical numeric IPv4 forms before any resolution", async () => {
     // glibc/musl getaddrinfo read these with inet_aton: 0177.0.0.1 and 0x7f.1 are
     // 127.0.0.1 and 012.0.0.1 is 10.0.0.1, whatever the guard might think.

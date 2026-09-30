@@ -247,8 +247,13 @@ export async function resolveAllowedAddress(host: string, allowPrivate = false):
     });
   }
   if (answers.length === 0) throw new Error(`Refusing to scan ${host}: DNS returned no addresses`);
+  // A resolver answer that is not an IP literal cannot be vetted or pinned, even with allowPrivate.
+  const unusable = answers.find((a) => isIP(a.address) === 0);
+  if (unusable) {
+    throw new Error(`Refusing to scan ${host}: DNS returned an answer that is not a usable IP address (${unusable.address})`);
+  }
 
-  const addresses = answers.map((a): ResolvedAddress => ({ address: a.address, family: a.family === 6 ? 6 : 4 }));
+  const addresses = answers.map((a): ResolvedAddress => ({ address: a.address, family: isIP(a.address) === 6 ? 6 : 4 }));
   if (!allowPrivate) {
     const blocked = addresses.find((a) => isBlockedAddress(a.address));
     if (blocked) {
