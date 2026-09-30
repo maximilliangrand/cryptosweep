@@ -7,10 +7,10 @@
 import { readFileSync } from "node:fs";
 import type { Socket } from "node:net";
 import { createPrivateKey } from "node:crypto";
-import { createSecureContext, createServer } from "node:tls";
+import { TLSSocket, createSecureContext, createServer } from "node:tls";
 import type { TlsOptions } from "node:tls";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { scanTls } from "../src/scanners/tls";
 import type { Finding } from "../src/report";
 
@@ -143,7 +143,8 @@ describe("live probe: TLS 1.3 servers", () => {
     const kex = byId(findings, "CSW-TLS-005");
     expect(kex.title).toBe("Server supports hybrid post-quantum key exchange (X25519MLKEM768)");
     expect(kex.pq_status).toBe("transitional");
-    expect(kex.confidence).toBe("confirmed");
+    // Confirmed where the runtime names the negotiated group; Node 22 does not (see below).
+    expect(kex.confidence).toBe(/inferred/.test(kex.evidence) ? "high" : "confirmed");
     expect(kex.recommendation).toMatch(/Not CNSA 2\.0 compliant/);
   });
 
@@ -171,6 +172,30 @@ describe("live probe: TLS 1.3 servers", () => {
     const key = byId(findings, "CSW-TLS-001");
     expect(key.title).toBe("Leaf public key: ML-DSA-65");
     expect(key.pq_status).toBe("safe");
+  });
+});
+
+describe("live probe: a runtime that does not report TLS 1.3 groups (Node 22)", () => {
+  // Node 22 returns {} from getEphemeralKeyInfo() for every TLS 1.3 group, so
+  // the probe could never confirm an ML-KEM group there. Simulated here.
+  afterEach(() => vi.restoreAllMocks());
+  const hideGroups = (): void => void vi.spyOn(TLSSocket.prototype, "getEphemeralKeyInfo").mockReturnValue({});
+
+  it("attributes the group from the single-group TLS 1.3 offer, at high confidence", async (ctx) => {
+    ctx.skip(!HAS_MLKEM, NO_MLKEM);
+    hideGroups();
+    const findings = await scanServer({ ...RSA, minVersion: "TLSv1.3", ecdhCurve: "X25519MLKEM768" });
+    const kex = byId(findings, "CSW-TLS-005");
+    expect(kex.title).toBe("Server supports hybrid post-quantum key exchange (X25519MLKEM768)");
+    expect(kex.confidence).toBe("high");
+    expect(kex.evidence).toMatch(/accepted=X25519MLKEM768 \(inferred from the single offered group/);
+  });
+
+  it("still never credits a TLS 1.2-only server", async () => {
+    hideGroups();
+    const findings = await scanServer({ ...RSA, maxVersion: "TLSv1.2", ciphers: "AES256-GCM-SHA384" });
+    expect(byId(findings, "CSW-TLS-005").title).toMatch(/^RSA key exchange without forward secrecy/);
+    expect(findings.some((f) => /supports .*post-quantum/.test(f.title))).toBe(false);
   });
 });
 

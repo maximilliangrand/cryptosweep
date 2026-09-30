@@ -81,7 +81,9 @@ export type HybridSupport = "supported" | "unsupported" | "unknown";
  * Outcome of offering one key-exchange group on its own.
  *
  * - `accepted`: TLS 1.3 completed and the runtime reported that group as the
- *   negotiated one (Node exposes it as `{ type: "TLSGroup", name }`).
+ *   negotiated one (Node exposes it as `{ type: "TLSGroup", name }`), or, on a
+ *   runtime that reports no TLS 1.3 group (Node 22), TLS 1.3 completed while
+ *   only that group was offered; `detail` then says the group was inferred.
  * - `rejected`: the server failed the handshake at the TLS layer.
  * - `inconclusive`: a transport error, a timeout, or a completed handshake the
  *   runtime could not attribute to the group.
@@ -826,6 +828,9 @@ function kexEvidence(target: string, result: TlsScanResult, probes: GroupProbeRe
 }
 
 const KEX_BASE = { id: "CSW-TLS-005", ruleId: "tls/hybrid-kex", category: "tls" as const };
+
+/** Probe detail for a group attributed from the offer because the runtime does not name TLS 1.3 groups. */
+const INFERRED_GROUP = "inferred from the single offered group; this runtime does not report the negotiated TLS 1.3 group";
 const ENABLE_PQ_KEX =
   "Enable X25519MLKEM768 (SecP384r1MLKEM1024 or MLKEM1024 where CNSA 2.0 applies) so session keys resist harvest-now-decrypt-later attacks.";
 
@@ -870,6 +875,12 @@ function pqKeyExchangeFinding(
     REFS.cnsa2,
   ];
   const kems = [...new Set(accepted.map((g) => g.kem))].join(", ");
+  // A group the runtime named is parsed evidence; one attributed from the offer is a protocol inference.
+  const allNamed = accepted.every(
+    (g) =>
+      g.name.toLowerCase() === result.groupName?.toLowerCase() ||
+      probes.some((p) => p.outcome === "accepted" && p.detail === undefined && p.group.toLowerCase() === g.name.toLowerCase()),
+  );
   const cnsa = cnsaKem
     ? "ML-KEM-1024 is available, the key-establishment parameter set CNSA 2.0 specifies."
     : `Not CNSA 2.0 compliant: CNSA 2.0 specifies ML-KEM-1024, so ${kems} groups are transitional where it applies; add SecP384r1MLKEM1024 or MLKEM1024 there.`;
@@ -879,7 +890,7 @@ function pqKeyExchangeFinding(
     title: `Server supports ${allHybrid ? "hybrid " : ""}post-quantum key exchange (${names})`,
     evidence: kexEvidence(target, result, probes),
     pq_status: allHybrid ? "transitional" : "safe",
-    confidence: "confirmed",
+    confidence: allNamed ? "confirmed" : "high",
     algorithm: accepted[0]?.name ?? "hybrid-kex",
     references,
     recommendation: `Keep it enabled: sessions with clients that offer these groups resist harvest-now-decrypt-later, while clients that do not still get classical key exchange. ${cnsa}`,
@@ -1254,6 +1265,12 @@ async function probeGroup(
   socket.end();
   if (protocol === "TLSv1.3" && negotiated?.toLowerCase() === group.toLowerCase()) {
     return { group, outcome: "accepted" };
+  }
+  if (protocol === "TLSv1.3" && negotiated === null) {
+    // RFC 8446 lets the server key the handshake only with a group the client
+    // offered, and a fresh TLS 1.3 handshake cannot skip (EC)DHE, so completing
+    // one while offering only this group means it was used.
+    return { group, outcome: "accepted", detail: INFERRED_GROUP };
   }
   return {
     group,
