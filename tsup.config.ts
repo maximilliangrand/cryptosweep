@@ -2,7 +2,7 @@ import { defineConfig } from "tsup";
 import type { Options } from "tsup";
 
 const shared: Options = {
-  target: "node20",
+  target: "node22",
   platform: "node",
   sourcemap: true,
   splitting: false,

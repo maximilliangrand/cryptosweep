@@ -62,7 +62,7 @@ describe("cryptosweep CLI", () => {
       bundle: true,
       platform: "node",
       format: "esm",
-      target: "node20",
+      target: "node22",
       logLevel: "silent",
     });
     preload = join(work, "fetch-stub.mjs");

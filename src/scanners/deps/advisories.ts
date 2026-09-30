@@ -1,8 +1,10 @@
 /**
  * Opt-in OSV.dev advisory enrichment for flagged dependencies.
  *
- * This is the only network path in cryptosweep and it is OFF by default (behind
- * `--advisories`). It adds a *distinct* dimension to a dependency finding, known
+ * This is the only network call the dependency scanner makes, and it is OFF by
+ * default (behind `--advisories`; on the MCP server, the operator's
+ * CRYPTOSWEEP_MCP_ADVISORIES). TLS scans and GitHub clones are network
+ * operations by nature and go through the SSRF guard instead. It adds a *distinct* dimension to a dependency finding, known
  * CVE advisories, without ever changing the post-quantum verdict: it only
  * appends references and one recommendation line. It queries OSV.dev only for
  * dependencies that are BOTH already flagged by the registry AND concretely

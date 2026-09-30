@@ -69,7 +69,7 @@ describe("cryptosweep-mcp bin", () => {
       bundle: true,
       platform: "node",
       format: "esm",
-      target: "node20",
+      target: "node22",
       logLevel: "silent",
     });
     await writeFile(join(dist, "..", "package.json"), JSON.stringify({ type: "module" }), "utf8");

@@ -18,7 +18,7 @@ describe("package invariants", () => {
     expect(Object.keys(pkg.dependencies)).toEqual(["cac"]);
   });
 
-  it("still targets Node >= 20 (Babel 8 would break this; parser is pinned to 7.x)", () => {
-    expect(pkg.engines?.node).toMatch(/>=\s*20/);
+  it("targets Node >= 22, the oldest line CI runs (the parser stays pinned to Babel 7.x)", () => {
+    expect(pkg.engines?.node).toMatch(/>=\s*22/);
   });
 });
