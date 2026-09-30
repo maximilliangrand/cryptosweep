@@ -1,53 +1,65 @@
 /**
  * Source-code crypto scanner.
  *
- * A fast first-pass regex sweep (no TS AST) over a local directory, flagging
- * weak `node:crypto` usage, JSON Web Token algorithms, hardcoded private keys
- * and PEM-encoded public keys. The github-clone helper lets the CLI scan a
- * remote repo by URL.
+ * Walks a local directory and inventories the cryptography each file uses,
+ * driven by the rule table in source-rules.ts:
+ *   - JavaScript/TypeScript is parsed (source-ast.ts), so a match in a comment
+ *     or an unrelated string never fires and callees resolve to their module;
+ *     a file that does not parse falls back to the JavaScript regexes;
+ *   - Python, Go and JVM sources are matched with linear regexes over the file
+ *     with its comments blanked out, at `medium` confidence;
+ *   - any other file gets the JavaScript regex sweep (embedded scripts, docs);
+ *   - PEM private and public keys are looked for in every file.
+ *
+ * Every finding carries a stable `ruleId` and a repository-relative,
+ * forward-slash path. Whatever the walk could not analyse (unreadable,
+ * oversized, binary, over a resource ceiling) is reported as an `info` coverage
+ * finding, so a clean result never hides a gap. Directory entries are visited
+ * in sorted order, so finding order and ids do not depend on the filesystem.
+ * The clone helper lets the CLI scan a remote repo by URL.
  */
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { createPublicKey } from "node:crypto";
+import type { KeyObject } from "node:crypto";
+import { constants } from "node:fs";
+import type { Dirent } from "node:fs";
+import { mkdtemp, open, opendir, rm } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { promisify } from "node:util";
-import type { Confidence, Finding, Severity } from "../report";
-import { REFS } from "../crypto";
-import { isJsTsFile, jwtAssessment, scanJsAst } from "./source-ast";
-import type { PushFinding, ScanJsResult } from "./source-ast";
+import type { Category, Confidence, Finding, Severity } from "../report";
+import { curveFriendlyName, keyAlgorithmLabel } from "../crypto";
+import type { KeyType } from "../crypto";
+import { isJsTsFile, scanJsAst } from "./source-ast";
+import type { ScanJsResult } from "./source-ast";
+import { REGEX_MATCHERS, REGEX_WINDOW_CHARS, assess, sourceRule } from "./source-rules";
+import type { RegexLanguage, RegexMatcher, RuleHit, RuleId, RuleSelection } from "./source-rules";
 
 const execFileAsync = promisify(execFile);
 
 export interface SourceScanOptions {
   /** Directories skipped during the walk. */
   ignoreDirs?: string[];
-  /** Files larger than this (bytes) are skipped. */
+  /** Files larger than this (bytes) are skipped, and reported as a coverage gap. */
   maxFileBytes?: number;
-  /** Maximum number of files to scan before stopping (bounds a hostile repo). */
+  /** Maximum number of files to open before stopping (bounds a hostile repo). */
   maxFiles?: number;
-  /** Maximum total bytes to read before stopping. */
+  /** Maximum total bytes to read before stopping, binary sniffs included. */
   maxTotalBytes?: number;
-}
-
-interface WalkBudget {
-  files: number;
-  bytes: number;
-  truncated: boolean;
-  /** Paths the walk could not read; reported so a coverage gap is never silent. */
-  skipped: { count: number; names: string[] };
-}
-
-/** How many skipped paths are named in the coverage finding; the rest are counted only. */
-const MAX_SKIPPED_NAMED = 10;
-
-/** Record an unreadable path, keeping only a bounded sample of the names. */
-function recordSkipped(budget: WalkBudget, relPath: string): void {
-  budget.skipped.count += 1;
-  if (budget.skipped.names.length < MAX_SKIPPED_NAMED) budget.skipped.names.push(relPath);
 }
 
 const DEFAULT_MAX_FILES = 25_000;
 const DEFAULT_MAX_TOTAL_BYTES = 300_000_000;
+const DEFAULT_MAX_FILE_BYTES = 2_000_000;
+/** Entries read from one directory; a larger directory truncates the scan (reported). */
+const MAX_DIR_ENTRIES = 100_000;
+/** A NUL byte in this prefix marks a file as binary; only the prefix is read. */
+const BINARY_SNIFF_BYTES = 8192;
+/** Findings reported per file; the rest are counted in a coverage finding. */
+const MAX_FINDINGS_PER_FILE = 500;
+/** How many paths a coverage finding names; the rest are counted only. */
+const MAX_NAMED_PATHS = 10;
 
 const DEFAULT_IGNORE_DIRS = new Set([
   "node_modules",
@@ -61,21 +73,36 @@ const DEFAULT_IGNORE_DIRS = new Set([
   ".turbo",
 ]);
 
-const DEFAULT_MAX_FILE_BYTES = 2_000_000;
+/** A bounded sample of paths for a coverage finding. */
+interface PathSample {
+  count: number;
+  names: string[];
+}
 
-const WEAK_HASH = /\bcreateHash\s*\(\s*["'`](md5|sha-?1)["'`]/gi;
-/** The cipher name is captured with a bounded class and tested separately, keeping the match linear. */
-const WEAK_CIPHER = /\bcreate(?:Cipher|Decipher)(?:iv)?\s*\(\s*["'`]([a-z0-9_-]{1,64})["'`]/gi;
-const WEAK_CIPHER_NAME = /des|rc4|rc2/i;
-const JWT_ALG = /["'`](HS256|HS384|HS512|RS256|RS384|RS512|ES256|ES384|ES512|PS256|PS384|PS512|EdDSA|none)["'`]/g;
-const JWT_USAGE = /jsonwebtoken|\bjwt\s*\.\s*(?:sign|verify|decode)/i;
-const PUBLIC_KEY = /-----BEGIN (?:RSA )?PUBLIC KEY-----/g;
+function newSample(): PathSample {
+  return { count: 0, names: [] };
+}
+
+function record(sample: PathSample, relPath: string): void {
+  sample.count += 1;
+  if (sample.names.length < MAX_NAMED_PATHS) sample.names.push(relPath);
+}
+
+function describeSample(sample: PathSample): string {
+  const more = sample.count - sample.names.length;
+  const named = sample.names.join(", ");
+  return more > 0 ? `${named}, and ${more} more` : named;
+}
+
+// ---------------------------------------------------------------------------
+// PEM key blocks
+// ---------------------------------------------------------------------------
 
 /**
- * Private-key PEM armor. Only the BEGIN marker is a regex; the body is checked
- * by {@link readPemBody}, one bounded forward scan. The old all-in-one pattern
- * had three overlapping newline quantifiers and backtracked cubically: a 6 KB
- * file of newlines after a BEGIN marker hung the scanner.
+ * PEM armor for private and public keys. Only the BEGIN marker is a regex; the
+ * body is checked by {@link readPemBody}, one bounded forward scan. The old
+ * all-in-one pattern had three overlapping newline quantifiers and backtracked
+ * cubically: a 6 KB file of newlines after a BEGIN marker hung the scanner.
  *
  * A block is only flagged when it has a real base64 body before the END marker.
  * A bare header or a `...`-elided snippet (as in READMEs and docs) does not
@@ -84,7 +111,8 @@ const PUBLIC_KEY = /-----BEGIN (?:RSA )?PUBLIC KEY-----/g;
  * passphrase-protected keys are the most common committed-key form, precisely
  * because developers believe the passphrase makes committing them safe.
  */
-const PRIVATE_KEY_BEGIN = /-----BEGIN (?:(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----/g;
+const PEM_BEGIN =
+  /-----BEGIN ((?:(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY|PGP PRIVATE KEY BLOCK)|(?:RSA )?PUBLIC KEY)-----/g;
 /** A PEM body longer than this is not a key (a 16384-bit RSA key is about 13 KB). */
 const PEM_MAX_BODY_CHARS = 64 * 1024;
 /** Armor headers (`Proc-Type:`, `DEK-Info:`, OpenPGP `Version:`) allowed before the body. */
@@ -103,6 +131,10 @@ function isAsciiDigit(code: number): boolean {
 
 function isBase64Char(code: number): boolean {
   return isAsciiLetter(code) || isAsciiDigit(code) || code === 0x2b || code === 0x2f || code === 0x3d; // + / =
+}
+
+function isBlank(code: number): boolean {
+  return code === 0x20 || code === 0x09;
 }
 
 /** `Name: value`, where Name is a letter followed by word characters or dashes. */
@@ -136,10 +168,6 @@ function lineBounds(content: string, pos: number, limit: number): { end: number;
     }
   }
   return { end: limit, next: limit };
-}
-
-function isBlank(code: number): boolean {
-  return code === 0x20 || code === 0x09;
 }
 
 /**
@@ -187,14 +215,225 @@ function readPemBody(content: string, start: number): string[] | null {
   return null;
 }
 
-/** Offsets of every private-key PEM block that carries a real base64 body. */
-function findPrivateKeyBlocks(content: string): number[] {
-  const offsets: number[] = [];
-  for (const { index, match } of matchAll(content, PRIVATE_KEY_BEGIN)) {
-    if (readPemBody(content, index + match[0].length) !== null) offsets.push(index);
-  }
-  return offsets;
+const CLASSICAL_KEY_TYPES: ReadonlySet<string> = new Set(["rsa", "rsa-pss", "dsa", "ec", "ed25519", "ed448"]);
+
+function isClassicalKeyType(type: string): type is Exclude<KeyType, "unknown"> {
+  return CLASSICAL_KEY_TYPES.has(type);
 }
+
+const PQ_KEY_TYPE = /^(?:ml-dsa|slh-dsa|ml-kem)-/;
+
+function parsePublicKey(pem: string): KeyObject | null {
+  try {
+    return createPublicKey(pem);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Classify an embedded public key by parsing it, instead of assuming RSA/EC:
+ * an ML-DSA or SLH-DSA key is post-quantum and needs no migration, while a
+ * classical key is graded like any other key (a 1024-bit RSA key is weak today).
+ */
+function publicKeyHit(index: number, label: string, body: readonly string[]): RuleHit {
+  const rule: RuleId = "keys/public-key-block";
+  const key = parsePublicKey(`-----BEGIN ${label}-----\n${body.join("\n")}\n-----END ${label}-----\n`);
+  const type = key?.asymmetricKeyType;
+  if (!key || !type) {
+    const selection: RuleSelection =
+      label === "RSA PUBLIC KEY"
+        ? { rule, algorithm: "RSA", detail: "RSA, did not parse" }
+        : { rule, detail: "did not parse", severity: "low", pq: "unknown", note: "The key did not parse, so its algorithm is unknown." };
+    return { index, tier: "medium", selection };
+  }
+  if (PQ_KEY_TYPE.test(type)) {
+    const algorithm = type.toUpperCase();
+    return {
+      index,
+      tier: "confirmed",
+      selection: { rule, algorithm, detail: algorithm, severity: "info", pq: "safe", note: "This is a post-quantum key; it needs no migration." },
+    };
+  }
+  if (isClassicalKeyType(type)) {
+    const details = key.asymmetricKeyDetails ?? {};
+    const bits = details.modulusLength;
+    const curve = curveFriendlyName(details.namedCurve) ?? undefined;
+    const algorithm = keyAlgorithmLabel(type, bits ?? null, curve ?? null);
+    return { index, tier: "confirmed", selection: { rule, algorithm, detail: algorithm, bits, curve } };
+  }
+  if (type === "x25519" || type === "x448" || type === "dh") {
+    const algorithm = type === "dh" ? "DH" : type.toUpperCase();
+    return { index, tier: "confirmed", selection: { rule, algorithm, detail: algorithm } };
+  }
+  return { index, tier: "confirmed", selection: { rule, detail: type, severity: "low", pq: "unknown" } };
+}
+
+/**
+ * Membership test for "offset lies inside a string literal". Ranges are sorted
+ * by start; a prefix maximum of their ends makes each query a binary search,
+ * so a file with many keys and many strings stays linear-logarithmic.
+ */
+function literalLookup(ranges: ReadonlyArray<readonly [number, number]>): (offset: number) => boolean {
+  const maxEnd: number[] = [];
+  for (const [, end] of ranges) maxEnd.push(Math.max(end, maxEnd[maxEnd.length - 1] ?? 0));
+  return (offset) => {
+    let lo = 0;
+    let hi = ranges.length - 1;
+    let found = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if ((ranges[mid]?.[0] ?? Infinity) <= offset) {
+        found = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return found >= 0 && (maxEnd[found] ?? 0) > offset;
+  };
+}
+
+/**
+ * PEM key blocks run on every file and in every language: a key in a comment
+ * is still a leak. When the AST ran, a private key inside a real string or
+ * template literal is upgraded from `high` to `confirmed`.
+ */
+function keyHits(content: string, ast: ScanJsResult | null): RuleHit[] {
+  const hits: RuleHit[] = [];
+  const inLiteral = ast?.used === "ast" ? literalLookup(ast.stringRanges) : null;
+  for (const { index, match } of matchAll(content, PEM_BEGIN)) {
+    const label = match[1] ?? "";
+    const body = readPemBody(content, index + match[0].length);
+    if (!body) continue;
+    if (label.includes("PRIVATE")) {
+      hits.push({ index, tier: inLiteral?.(index) ? "confirmed" : "high", selection: { rule: "keys/private-key-block" } });
+    } else {
+      hits.push(publicKeyHit(index, label, body));
+    }
+  }
+  return hits;
+}
+
+// ---------------------------------------------------------------------------
+// Regex languages
+// ---------------------------------------------------------------------------
+
+type SourceLanguage = "javascript" | RegexLanguage | "other";
+
+function languageOf(relPath: string): SourceLanguage {
+  if (isJsTsFile(relPath)) return "javascript";
+  const p = relPath.toLowerCase();
+  if (/\.(?:py|pyw|pyi)$/.test(p)) return "python";
+  if (p.endsWith(".go")) return "go";
+  if (/\.(?:java|kt|kts|scala|groovy)$/.test(p)) return "java";
+  return "other";
+}
+
+const REGEX_BY_LANGUAGE: ReadonlyMap<RegexLanguage, readonly RegexMatcher[]> = (() => {
+  const map = new Map<RegexLanguage, RegexMatcher[]>();
+  for (const matcher of REGEX_MATCHERS) {
+    const list = map.get(matcher.language) ?? [];
+    list.push(matcher);
+    map.set(matcher.language, list);
+  }
+  return map;
+})();
+
+/** Index of the first unescaped `quote` at or after `from` (or `limit`); `\` skips a character. */
+function skipQuoted(content: string, from: number, quote: string, multiline: boolean, escapes: boolean): number {
+  let i = from;
+  while (i < content.length) {
+    const c = content[i];
+    if (escapes && c === "\\") {
+      i += 2;
+      continue;
+    }
+    if (content.startsWith(quote, i)) return i + quote.length;
+    if (!multiline && c === "\n") return i;
+    i += 1;
+  }
+  return content.length;
+}
+
+/**
+ * Blank out comments, keeping every offset and newline so line numbers and
+ * match positions are unchanged. Strings are skipped, not blanked: algorithm
+ * names live in them. One forward pass, linear in the file size.
+ */
+function stripComments(content: string, language: RegexLanguage): string {
+  const ranges: Array<[number, number]> = [];
+  const hashComments = language === "python";
+  let i = 0;
+  while (i < content.length) {
+    const c = content[i];
+    if (hashComments && c === "#") {
+      const end = content.indexOf("\n", i);
+      ranges.push([i, end < 0 ? content.length : end]);
+      i = end < 0 ? content.length : end;
+    } else if (!hashComments && c === "/" && content[i + 1] === "/") {
+      const end = content.indexOf("\n", i);
+      ranges.push([i, end < 0 ? content.length : end]);
+      i = end < 0 ? content.length : end;
+    } else if (!hashComments && c === "/" && content[i + 1] === "*") {
+      const end = content.indexOf("*/", i + 2);
+      const stop = end < 0 ? content.length : end + 2;
+      ranges.push([i, stop]);
+      i = stop;
+    } else if ((c === '"' || c === "'") && content.startsWith(c.repeat(3), i) && language !== "go") {
+      i = skipQuoted(content, i + 3, c.repeat(3), true, true);
+    } else if (c === '"' || c === "'") {
+      i = skipQuoted(content, i + 1, c, false, true);
+    } else if (c === "`" && language === "go") {
+      i = skipQuoted(content, i + 1, "`", true, false);
+    } else {
+      i += 1;
+    }
+  }
+  if (ranges.length === 0) return content;
+  let out = "";
+  let last = 0;
+  for (const [start, end] of ranges) {
+    out += content.slice(last, start) + content.slice(start, end).replace(/[^\n]/g, " ");
+    last = end;
+  }
+  return out + content.slice(last);
+}
+
+function* matchAll(content: string, pattern: RegExp): Generator<{ index: number; match: RegExpExecArray }> {
+  const regex = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`);
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(content)) !== null) {
+    yield { index: match.index, match };
+    if (match.index === regex.lastIndex) regex.lastIndex += 1;
+  }
+}
+
+/** Run one language's regex matchers; every match is `medium` evidence. */
+function regexHits(text: string, language: RegexLanguage): RuleHit[] {
+  const hits: RuleHit[] = [];
+  const gates = new Map<RegExp, boolean>();
+  for (const matcher of REGEX_BY_LANGUAGE.get(language) ?? []) {
+    if (matcher.gate) {
+      let open = gates.get(matcher.gate);
+      if (open === undefined) {
+        open = matcher.gate.test(text);
+        gates.set(matcher.gate, open);
+      }
+      if (!open) continue;
+    }
+    for (const { index, match } of matchAll(text, matcher.pattern)) {
+      const end = index + match[0].length;
+      const after = text.slice(end, end + REGEX_WINDOW_CHARS);
+      for (const selection of matcher.classify(match, after)) hits.push({ index, tier: "medium", selection });
+    }
+  }
+  return hits;
+}
+
+// ---------------------------------------------------------------------------
+// Findings
+// ---------------------------------------------------------------------------
 
 /**
  * Where a match was found. A weak primitive in a real source file is a live code
@@ -225,20 +464,12 @@ function lowerSeverity(base: Severity, steps: number): Severity {
 }
 
 /**
- * Effective severity + confidence for a base severity given the file context.
- * `tier` is the source-context confidence a caller earned: `confirmed` for an
- * import-resolved AST match, `high` for a distinctive-but-unresolved AST match or
- * a well-formed PEM block, `medium` for a plain regex match. In docs/tests every
- * match is de-rated to `low` and its severity dropped two rungs, regardless.
+ * Effective severity + confidence for a match given the file context. `tier`
+ * is the confidence the evidence earned (see source-rules.ts). In docs/tests
+ * every match is de-rated to `low` and its severity dropped two rungs.
  */
-function calibrate(
-  base: Severity,
-  context: FileContext,
-  tier: Confidence = "medium",
-): { severity: Severity; confidence: Confidence } {
-  if (context === "source") {
-    return { severity: base, confidence: tier };
-  }
+function calibrate(base: Severity, context: FileContext, tier: Confidence): { severity: Severity; confidence: Confidence } {
+  if (context === "source") return { severity: base, confidence: tier };
   return { severity: lowerSeverity(base, 2), confidence: "low" };
 }
 
@@ -251,6 +482,8 @@ class IdAllocator {
     return `CSW-${prefix}-${String(value).padStart(3, "0")}`;
   }
 }
+
+const ID_PREFIX: Record<Category, string> = { source: "SRC", jwt: "JWT", keys: "KEY", deps: "DEP", tls: "TLS" };
 
 /**
  * 1-based line lookup. Newline offsets are computed once per file and each
@@ -276,241 +509,307 @@ class LineIndex {
   }
 }
 
-function* matchAll(
-  content: string,
-  pattern: RegExp,
-): Generator<{ index: number; match: RegExpExecArray }> {
-  const regex = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`);
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(content)) !== null) {
-    yield { index: match.index, match };
-    if (match.index === regex.lastIndex) regex.lastIndex += 1;
+function byPosition(a: RuleHit, z: RuleHit): number {
+  if (a.index !== z.index) return a.index - z.index;
+  return a.selection.rule < z.selection.rule ? -1 : a.selection.rule > z.selection.rule ? 1 : 0;
+}
+
+function toFinding(hit: RuleHit, relPath: string, context: FileContext, lines: LineIndex, ids: IdAllocator): Finding {
+  const a = assess(hit);
+  const { severity, confidence } = calibrate(a.severity, context, a.confidence);
+  const line = lines.lineOf(hit.index);
+  return {
+    id: ids.next(ID_PREFIX[a.rule.category]),
+    ruleId: a.rule.id,
+    severity,
+    category: a.rule.category,
+    title: a.title,
+    evidence: `${relPath}:${line}`,
+    location: { path: relPath, line },
+    pq_status: a.pq,
+    confidence,
+    ...(a.algorithm ? { algorithm: a.algorithm } : {}),
+    recommendation: a.recommendation,
+    ...(a.references.length > 0 ? { references: a.references } : {}),
+  };
+}
+
+interface ContentAnalysis {
+  findings: Finding[];
+  /** Matches beyond the per-file cap, not reported. */
+  dropped: number;
+  /** A JS/TS file that went through the regex fallback instead of the AST. */
+  fallback: boolean;
+}
+
+function analyzeContent(relPath: string, content: string, ids: IdAllocator): ContentAnalysis {
+  const language = languageOf(relPath);
+  const hits: RuleHit[] = [];
+  let ast: ScanJsResult | null = null;
+  let fallback = false;
+  if (language === "javascript") {
+    ast = scanJsAst(relPath, content);
+    fallback = ast.used !== "ast";
+    hits.push(...(fallback ? regexHits(content, "javascript") : ast.hits));
+  } else if (language === "other") {
+    hits.push(...regexHits(content, "javascript"));
+  } else {
+    hits.push(...regexHits(stripComments(content, language), language));
   }
+  hits.push(...keyHits(content, ast));
+
+  const seen = new Set<string>();
+  const unique = hits.sort(byPosition).filter((hit) => {
+    const key = `${hit.index}|${hit.selection.rule}|${hit.selection.algorithm ?? ""}|${hit.selection.detail ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const kept = unique.slice(0, MAX_FINDINGS_PER_FILE);
+  const context = classifyFile(relPath);
+  const lines = new LineIndex(kept.length > 0 ? content : "");
+  return {
+    findings: kept.map((hit) => toFinding(hit, relPath, context, lines, ids)),
+    dropped: unique.length - kept.length,
+    fallback,
+  };
+}
+
+function coverageFinding(id: string, rule: RuleId, title: string, evidence: string): Finding {
+  return {
+    id,
+    ruleId: rule,
+    severity: "info",
+    category: "source",
+    title,
+    evidence,
+    pq_status: "unknown",
+    confidence: "confirmed",
+    recommendation: sourceRule(rule).recommendation,
+  };
 }
 
 /** Scan a single file's content. Pure, drives the source scanner tests. */
 export function scanContent(relPath: string, content: string, ids = new IdAllocator()): Finding[] {
-  const findings: Finding[] = [];
-  const context = classifyFile(relPath);
-  let lines: LineIndex | null = null;
-  const lineOf = (index: number): number => (lines ??= new LineIndex(content)).lineOf(index);
-
-  const push: PushFinding = (prefix, baseSeverity, category, title, index, pq, recommendation, opts = {}) => {
-    const { severity, confidence } = calibrate(baseSeverity, context, opts.tier);
-    const line = lineOf(index);
-    findings.push({
-      id: ids.next(prefix),
-      severity,
-      category,
-      title,
-      evidence: `${relPath}:${line}`,
-      location: { path: relPath, line },
-      pq_status: pq,
-      confidence,
-      algorithm: opts.algorithm,
-      recommendation,
-      references: opts.references,
-    });
-  };
-
-  // Structural first-pass for JS/TS. When it parses cleanly it owns hash/cipher/jwt
-  // (already pushed), so the regexes below are skipped for that file to avoid
-  // double counting; anything else falls through to the regex sweep.
-  let ast: ScanJsResult = { used: "fallback", stringRanges: [] };
-  if (isJsTsFile(relPath)) ast = scanJsAst(relPath, content, push);
-
-  if (ast.used !== "ast") {
-    for (const { index, match } of matchAll(content, WEAK_HASH)) {
-      push(
-        "SRC",
-        "high",
-        "source",
-        `Weak hash algorithm via node:crypto (${match[1]})`,
-        index,
-        "vulnerable",
-        "Replace MD5/SHA-1 with SHA-256 or SHA-3; both are already collision-broken classically.",
-        { algorithm: /^md5$/i.test(match[1] ?? "") ? "MD5" : "SHA-1", references: [REFS.cwe327, REFS.sp800131a] },
-      );
-    }
-
-    for (const { index, match } of matchAll(content, WEAK_CIPHER)) {
-      if (!WEAK_CIPHER_NAME.test(match[1] ?? "")) continue;
-      push(
-        "SRC",
-        "high",
-        "source",
-        `Weak symmetric cipher via node:crypto (${match[1]})`,
-        index,
-        "vulnerable",
-        "Replace DES/3DES/RC4/RC2 with AES-256-GCM and re-key affected data.",
-        { algorithm: (match[1] ?? "").toUpperCase(), references: [REFS.cwe327] },
-      );
-    }
-
-    if (JWT_USAGE.test(content)) {
-      for (const { index, match } of matchAll(content, JWT_ALG)) {
-        const alg = match[1] ?? "unknown";
-        const { severity, pq, note } = jwtAssessment(alg);
-        push("JWT", severity, "jwt", `JSON Web Token algorithm ${alg}`, index, pq, note, { algorithm: `JWT-${alg}` });
-      }
-    }
-  }
-
-  // PEM keys always run in both paths (a key in a comment is still a leak). When
-  // the AST ran, a key sitting inside a real string/template literal is upgraded
-  // from `high` to `confirmed`.
-  for (const index of findPrivateKeyBlocks(content)) {
-    const inLiteral = ast.used === "ast" && ast.stringRanges.some(([s, e]) => index >= s && index < e);
-    push(
-      "KEY",
-      "critical",
-      "keys",
-      "Hardcoded private key block",
-      index,
-      "vulnerable",
-      "Remove the key from source, rotate it immediately, and load secrets from a vault/KMS.",
-      { tier: inLiteral ? "confirmed" : "high" },
+  const { findings, dropped } = analyzeContent(relPath, content, ids);
+  if (dropped > 0) {
+    findings.push(
+      coverageFinding(
+        ids.next("COV"),
+        "source/findings-capped",
+        `${dropped} further match(es) in ${relPath} were not reported (per-file cap of ${MAX_FINDINGS_PER_FILE})`,
+        relPath,
+      ),
     );
   }
-
-  for (const { index } of matchAll(content, PUBLIC_KEY)) {
-    push(
-      "KEY",
-      "medium",
-      "keys",
-      "Embedded PEM public key (RSA/EC)",
-      index,
-      "vulnerable",
-      "Inventory the key; RSA/EC public keys are pinned trust anchors that need a PQ migration plan.",
-    );
-  }
-
   return findings;
 }
 
-function isProbablyBinary(buffer: Buffer): boolean {
-  const sample = buffer.subarray(0, 8192);
-  return sample.includes(0);
+// ---------------------------------------------------------------------------
+// The walk
+// ---------------------------------------------------------------------------
+
+interface WalkState {
+  readonly rootDir: string;
+  readonly ignoreDirs: ReadonlySet<string>;
+  readonly maxFileBytes: number;
+  readonly ids: IdAllocator;
+  readonly findings: Finding[];
+  /** Remaining budgets. */
+  files: number;
+  bytes: number;
+  /** Totals, for the truncation evidence. */
+  filesOpened: number;
+  bytesRead: number;
+  truncated: boolean;
+  readonly unreadable: PathSample;
+  readonly oversized: PathSample;
+  readonly binary: PathSample;
+  readonly capped: PathSample;
+  readonly fallback: PathSample;
+}
+
+/** Repository-relative, forward-slash path (SARIF and every finding use the same base). */
+function toRelative(rootDir: string, full: string): string {
+  return relative(rootDir, full).split(sep).join("/");
+}
+
+function byName(a: Dirent, z: Dirent): number {
+  return a.name < z.name ? -1 : a.name > z.name ? 1 : 0;
+}
+
+async function listDirectory(dir: string): Promise<{ entries: Dirent[]; truncated: boolean }> {
+  const entries: Dirent[] = [];
+  let truncated = false;
+  for await (const entry of await opendir(dir)) {
+    if (entries.length >= MAX_DIR_ENTRIES) {
+      truncated = true;
+      break;
+    }
+    entries.push(entry);
+  }
+  return { entries: entries.sort(byName), truncated };
+}
+
+/** Read `[from, to)` of the file into `buffer` at the same offsets; returns the end reached. */
+async function readInto(handle: FileHandle, buffer: Buffer, from: number, to: number): Promise<number> {
+  let offset = from;
+  while (offset < to) {
+    const { bytesRead } = await handle.read(buffer, offset, to - offset, offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  return offset;
 }
 
 /**
- * Read and scan one file.
- *
- * Size is checked with `stat` BEFORE the read, so an oversized file is never
- * buffered into memory (which is the resource ceiling this scanner promises),
- * and every I/O failure degrades to a recorded skip. One unreadable file in a
- * repo — a `chmod 000` fixture, an odd mode in a CI checkout — used to abort the
- * whole scan and discard every finding already collected.
+ * Open without following a symlink swapped in after the directory listing, and
+ * without blocking on a FIFO. Both flags are POSIX-only and zero elsewhere.
  */
-async function scanFile(
-  full: string,
-  relPath: string,
-  maxFileBytes: number,
-  ids: IdAllocator,
-  findings: Finding[],
-  budget: WalkBudget,
-): Promise<void> {
-  let size: number;
-  try {
-    size = (await stat(full)).size;
-  } catch {
-    recordSkipped(budget, relPath);
-    return;
-  }
-  if (size > maxFileBytes) return;
+const OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
 
-  let buffer: Buffer;
+/**
+ * Read and scan one file. Size is checked on the open handle BEFORE any read,
+ * so an oversized file is never buffered; binary detection reads only a small
+ * prefix; and every byte read, binary sniffs included, is charged to the
+ * budget. Every I/O failure degrades to a recorded skip: one unreadable file
+ * (a `chmod 000` fixture, an odd mode in a CI checkout) used to abort the scan.
+ */
+async function scanFile(full: string, relPath: string, state: WalkState): Promise<void> {
+  let handle: FileHandle;
   try {
-    buffer = await readFile(full);
+    handle = await open(full, OPEN_FLAGS);
   } catch {
-    recordSkipped(budget, relPath);
+    record(state.unreadable, relPath);
     return;
   }
-  if (buffer.byteLength > maxFileBytes || isProbablyBinary(buffer)) return;
-  budget.files -= 1;
-  budget.bytes -= buffer.byteLength;
-  findings.push(...scanContent(relPath, buffer.toString("utf8"), ids));
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) {
+      record(state.unreadable, relPath);
+      return;
+    }
+    state.files -= 1;
+    state.filesOpened += 1;
+    if (info.size > state.maxFileBytes) {
+      record(state.oversized, relPath);
+      return;
+    }
+    const sniff = Math.min(info.size, BINARY_SNIFF_BYTES);
+    if (sniff > state.bytes) {
+      state.truncated = true;
+      return;
+    }
+    const buffer = Buffer.alloc(info.size);
+    const sniffed = await readInto(handle, buffer, 0, sniff);
+    state.bytes -= sniffed;
+    state.bytesRead += sniffed;
+    if (buffer.subarray(0, sniffed).includes(0)) {
+      record(state.binary, relPath);
+      return;
+    }
+    if (info.size - sniffed > state.bytes) {
+      state.truncated = true;
+      return;
+    }
+    const end = await readInto(handle, buffer, sniffed, info.size);
+    state.bytes -= end - sniffed;
+    state.bytesRead += end - sniffed;
+    const analysis = analyzeContent(relPath, buffer.subarray(0, end).toString("utf8"), state.ids);
+    state.findings.push(...analysis.findings);
+    if (analysis.dropped > 0) record(state.capped, relPath);
+    if (analysis.fallback) record(state.fallback, relPath);
+  } catch {
+    record(state.unreadable, relPath);
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
 }
 
-async function walk(
-  rootDir: string,
-  currentDir: string,
-  ignoreDirs: Set<string>,
-  maxFileBytes: number,
-  ids: IdAllocator,
-  findings: Finding[],
-  budget: WalkBudget,
-): Promise<void> {
-  let entries;
+async function walk(dir: string, state: WalkState): Promise<void> {
+  let listing: { entries: Dirent[]; truncated: boolean };
   try {
-    entries = await readdir(currentDir, { withFileTypes: true });
+    listing = await listDirectory(dir);
   } catch {
-    recordSkipped(budget, relativeTo(rootDir, currentDir));
+    record(state.unreadable, toRelative(state.rootDir, dir) || ".");
     return;
   }
-  for (const entry of entries) {
-    if (budget.files <= 0 || budget.bytes <= 0) {
-      budget.truncated = true;
+  if (listing.truncated) state.truncated = true;
+  for (const entry of listing.entries) {
+    if (state.truncated || state.files <= 0 || state.bytes <= 0) {
+      state.truncated = true;
       return;
     }
     if (entry.isSymbolicLink()) continue;
-    const full = join(currentDir, entry.name);
+    const full = join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (ignoreDirs.has(entry.name)) continue;
-      await walk(rootDir, full, ignoreDirs, maxFileBytes, ids, findings, budget);
+      if (!state.ignoreDirs.has(entry.name)) await walk(full, state);
     } else if (entry.isFile()) {
-      await scanFile(full, relativeTo(rootDir, full) || entry.name, maxFileBytes, ids, findings, budget);
+      await scanFile(full, toRelative(state.rootDir, full), state);
     }
   }
 }
 
-function relativeTo(rootDir: string, full: string): string {
-  return full.startsWith(rootDir) ? full.slice(rootDir.length).replace(/^[/\\]/, "") : full;
+function coverageFindings(state: WalkState, maxFiles: number, maxTotalBytes: number): Finding[] {
+  const out: Finding[] = [];
+  const add = (sample: PathSample, rule: RuleId, title: string): void => {
+    if (sample.count > 0) out.push(coverageFinding(state.ids.next("COV"), rule, title, describeSample(sample)));
+  };
+  const n = (sample: PathSample): number => sample.count;
+  const megabytes = Math.round((state.maxFileBytes / 1_000_000) * 10) / 10;
+  add(state.unreadable, "source/unreadable-path", `${n(state.unreadable)} path(s) could not be read, coverage is incomplete`);
+  add(
+    state.oversized,
+    "source/file-too-large",
+    `${n(state.oversized)} file(s) above the ${megabytes} MB per-file limit were not analysed, coverage is incomplete`,
+  );
+  add(state.binary, "source/binary-skipped", `${n(state.binary)} binary-looking file(s) were not analysed`);
+  add(
+    state.capped,
+    "source/findings-capped",
+    `${n(state.capped)} file(s) had more than ${MAX_FINDINGS_PER_FILE} matches; only the first ${MAX_FINDINGS_PER_FILE} per file are reported`,
+  );
+  add(
+    state.fallback,
+    "source/ast-fallback",
+    `${n(state.fallback)} JavaScript/TypeScript file(s) did not parse and were analysed by the regex fallback`,
+  );
+  if (state.truncated) {
+    out.push(
+      coverageFinding(
+        "CSW-SRC-000",
+        "source/scan-truncated",
+        "Source scan stopped at a resource limit, coverage is incomplete",
+        `stopped after ${state.filesOpened} file(s) and ${state.bytesRead} byte(s) (limits: ${maxFiles} files, ${maxTotalBytes} bytes, ${MAX_DIR_ENTRIES} entries per directory)`,
+      ),
+    );
+  }
+  return out;
 }
 
 /** Recursively scan a local directory for quantum-vulnerable crypto. */
 export async function scanSource(rootDir: string, options: SourceScanOptions = {}): Promise<Finding[]> {
-  const ignoreDirs = new Set([...DEFAULT_IGNORE_DIRS, ...(options.ignoreDirs ?? [])]);
-  const maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
-  const findings: Finding[] = [];
-  const budget: WalkBudget = {
-    files: options.maxFiles ?? DEFAULT_MAX_FILES,
-    bytes: options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES,
+  const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
+  const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
+  const state: WalkState = {
+    rootDir,
+    ignoreDirs: new Set([...DEFAULT_IGNORE_DIRS, ...(options.ignoreDirs ?? [])]),
+    maxFileBytes: options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES,
+    ids: new IdAllocator(),
+    findings: [],
+    files: maxFiles,
+    bytes: maxTotalBytes,
+    filesOpened: 0,
+    bytesRead: 0,
     truncated: false,
-    skipped: { count: 0, names: [] },
+    unreadable: newSample(),
+    oversized: newSample(),
+    binary: newSample(),
+    capped: newSample(),
+    fallback: newSample(),
   };
-  await walk(rootDir, rootDir, ignoreDirs, maxFileBytes, new IdAllocator(), findings, budget);
-  if (budget.skipped.count > 0) {
-    const named = budget.skipped.names.join(", ");
-    const more = budget.skipped.count - budget.skipped.names.length;
-    findings.push({
-      id: "CSW-COV-001",
-      ruleId: "source/unreadable-path",
-      severity: "info",
-      category: "source",
-      title: `${budget.skipped.count} path(s) could not be read, coverage is incomplete`,
-      evidence: more > 0 ? `${named}, and ${more} more` : named,
-      pq_status: "unknown",
-      confidence: "confirmed",
-      recommendation:
-        "Grant the scanning user read access to these paths (or exclude them deliberately) so they are not a silent gap in the inventory.",
-    });
-  }
-  if (budget.truncated) {
-    findings.push({
-      id: "CSW-SRC-000",
-      ruleId: "source/scan-truncated",
-      severity: "info",
-      category: "source",
-      title: "Source scan stopped at a resource limit, coverage is incomplete",
-      evidence: `${rootDir} (file or byte cap reached)`,
-      pq_status: "unknown",
-      confidence: "confirmed",
-      recommendation:
-        "Some files were not analyzed. Raise maxFiles/maxTotalBytes or scan subdirectories individually for full coverage.",
-    });
-  }
-  return findings;
+  await walk(rootDir, state);
+  return [...state.findings, ...coverageFindings(state, maxFiles, maxTotalBytes)];
 }
 
 export interface ClonedRepo {
