@@ -19,7 +19,7 @@
  * adjacent repetitions that can match the same characters.
  */
 import { REFS, curveFriendlyName } from "../crypto";
-import type { Category, Confidence, PqStatus, Reference, Severity } from "../report";
+import type { Category, Confidence, CryptoUsage, PqStatus, Reference, Severity } from "../report";
 
 export type RuleUsage =
   | "key-generation"
@@ -40,6 +40,13 @@ interface RuleSpec {
   /** The primitive (family) this rule inventories, e.g. `RSA`, `ECDH`, `MD5/SHA-1`. */
   readonly primitive: string;
   readonly usage: RuleUsage;
+  /**
+   * What the primitive is used for, in the report's vocabulary: it becomes the
+   * finding's `usage`, which the risk engine reads to pick a threat model.
+   * Empty when the rule cannot tell (an RSA or EC key-generation call can end
+   * up signing or decrypting), so the engine assesses both threat models.
+   */
+  readonly findingUsage: readonly CryptoUsage[];
   readonly language: RuleLanguage;
   /** The library or API surface the rule matches, e.g. `node:crypto`, `WebCrypto`, `PyJWT`. */
   readonly api: string;
@@ -87,6 +94,18 @@ const ADVICE_REFS: Record<AsymmetricUsage, readonly Reference[]> = {
   encryption: [REFS.fips203, REFS.ir8547, REFS.cnsa2],
 };
 
+/**
+ * The finding usage implied by an asymmetric row. Key generation implies a use
+ * only through its advice (DSA and EdDSA keys sign, X25519 and DH keys agree),
+ * which is why `asymmetric()` takes it from the advice, not the rule usage.
+ */
+const FINDING_USAGE: Record<AsymmetricUsage, readonly CryptoUsage[]> = {
+  "key-generation": [],
+  signing: ["signature"],
+  "key-agreement": ["key-establishment"],
+  encryption: ["encryption"],
+};
+
 /** Regex-matched languages earn `medium`; the JS/TS AST can earn `confirmed`. */
 function ceilingFor(language: RuleLanguage): Confidence {
   return language === "javascript" ? "confirmed" : "medium";
@@ -105,6 +124,7 @@ function asymmetric(
     title,
     primitive,
     usage,
+    findingUsage: FINDING_USAGE[advice],
     language,
     api,
     confidence: ceilingFor(language),
@@ -133,6 +153,7 @@ function weakHash(api: string, language: RuleLanguage, title: string): RuleSpec 
     title,
     primitive: "MD5/SHA-1",
     usage: "hashing",
+    findingUsage: ["hashing"],
     language,
     api,
     confidence: weakHashCeiling(language),
@@ -150,6 +171,7 @@ function weakHashNonSecurity(api: string, language: RuleLanguage, title: string)
     title,
     primitive: "MD5/SHA-1",
     usage: "hashing",
+    findingUsage: ["hashing"],
     language,
     api,
     confidence: weakHashCeiling(language),
@@ -167,6 +189,7 @@ function weakCipher(api: string, language: RuleLanguage, title: string): RuleSpe
     title,
     primitive: "DES/3DES/RC4/RC2",
     usage: "encryption",
+    findingUsage: ["encryption"],
     language,
     api,
     confidence: ceilingFor(language),
@@ -183,6 +206,7 @@ function coverage(title: string, recommendation: string): RuleSpec {
     title,
     primitive: "none",
     usage: "coverage",
+    findingUsage: [],
     language: "any",
     api: "cryptosweep",
     confidence: "confirmed",
@@ -203,13 +227,17 @@ export type JwtClass =
   | "ecdh-key-agreement"
   | "algorithm-unresolved";
 
-type JwtClassSpec = Pick<RuleSpec, "title" | "primitive" | "usage" | "severity" | "pq" | "recommendation" | "references">;
+type JwtClassSpec = Pick<
+  RuleSpec,
+  "title" | "primitive" | "usage" | "findingUsage" | "severity" | "pq" | "recommendation" | "references"
+>;
 
 const JWT_CLASSES: Record<JwtClass, JwtClassSpec> = {
   "alg-none": {
     title: "Unsigned JWT (alg none)",
     primitive: "none",
     usage: "signing",
+    findingUsage: ["authentication"],
     severity: "critical",
     pq: "vulnerable",
     recommendation: 'JWT "alg: none" disables signature verification, remove it.',
@@ -219,6 +247,7 @@ const JWT_CLASSES: Record<JwtClass, JwtClassSpec> = {
     title: "JWT HMAC algorithm",
     primitive: "HMAC",
     usage: "mac",
+    findingUsage: ["authentication"],
     severity: "low",
     pq: "safe",
     recommendation:
@@ -229,6 +258,7 @@ const JWT_CLASSES: Record<JwtClass, JwtClassSpec> = {
     title: "JWT RSA signature algorithm",
     primitive: "RSA",
     usage: "signing",
+    findingUsage: ["signature"],
     severity: "high",
     pq: "vulnerable",
     recommendation:
@@ -239,6 +269,7 @@ const JWT_CLASSES: Record<JwtClass, JwtClassSpec> = {
     title: "JWT ECDSA signature algorithm",
     primitive: "ECDSA",
     usage: "signing",
+    findingUsage: ["signature"],
     severity: "high",
     pq: "vulnerable",
     recommendation:
@@ -249,6 +280,7 @@ const JWT_CLASSES: Record<JwtClass, JwtClassSpec> = {
     title: "JWT EdDSA signature algorithm",
     primitive: "EdDSA",
     usage: "signing",
+    findingUsage: ["signature"],
     severity: "high",
     pq: "vulnerable",
     recommendation:
@@ -259,6 +291,7 @@ const JWT_CLASSES: Record<JwtClass, JwtClassSpec> = {
     title: "JWE RSA key transport",
     primitive: "RSA",
     usage: "encryption",
+    findingUsage: ["encryption"],
     severity: "high",
     pq: "vulnerable",
     recommendation:
@@ -269,6 +302,7 @@ const JWT_CLASSES: Record<JwtClass, JwtClassSpec> = {
     title: "JWE ECDH-ES key agreement",
     primitive: "ECDH",
     usage: "key-agreement",
+    findingUsage: ["key-establishment"],
     severity: "high",
     pq: "vulnerable",
     recommendation:
@@ -279,6 +313,7 @@ const JWT_CLASSES: Record<JwtClass, JwtClassSpec> = {
     title: "JWT call whose algorithm is not statically known",
     primitive: "unknown",
     usage: "signing",
+    findingUsage: [],
     severity: "info",
     pq: "unknown",
     recommendation:
@@ -349,6 +384,7 @@ const CATALOGUE = {
     title: "MD5/SHA-1 inside HMAC or a KDF via node:crypto",
     primitive: "MD5/SHA-1",
     usage: "mac",
+    findingUsage: ["authentication"],
     language: "javascript",
     api: NODE,
     confidence: "confirmed",
@@ -437,6 +473,7 @@ const CATALOGUE = {
     title: "Hardcoded private key block",
     primitive: "private key",
     usage: "key-material",
+    findingUsage: ["secret-material"],
     language: "any",
     api: "PEM",
     confidence: "confirmed",
@@ -450,6 +487,8 @@ const CATALOGUE = {
     title: "Embedded PEM public key",
     primitive: "public key",
     usage: "key-material",
+    // What the key is for follows from its parsed algorithm (the risk engine reads it).
+    findingUsage: [],
     language: "any",
     api: "PEM",
     confidence: "confirmed",

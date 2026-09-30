@@ -138,6 +138,7 @@ const USAGE_BY_RULE: Readonly<Record<string, readonly CryptoUsage[]>> = {
   "tls/leaf-public-key": ["authentication"],
   "tls/leaf-signature": ["signature"],
   "tls/chain-classical": ["signature"],
+  "tls/intermediate-signature": ["signature"],
   "tls/negotiated-protocol": ["protocol"],
 };
 
@@ -233,9 +234,18 @@ export function resolveUsage(finding: Finding): CryptoUsage[] {
   return byAlgorithm ? [...byAlgorithm] : [];
 }
 
-/** The reason a finding is broken classically today, or undefined. */
+/**
+ * The reason a finding is broken classically today, or undefined.
+ *
+ * Committed key material is compromised whatever the scanner says about it.
+ * An algorithm is a present-day break only where the scanner flagged it: a
+ * scanner that finds SHA-1 computing an ETag or inside HMAC reports it with a
+ * `pq_status` other than `vulnerable`, because nothing there relies on the
+ * collision resistance that is broken, and that finding stays off the board.
+ */
 function classicalBreak(finding: Finding, usage: readonly CryptoUsage[]): string | undefined {
   if (usage.includes("secret-material")) return SECRET_MATERIAL_REASON;
+  if (finding.pq_status !== "vulnerable") return undefined;
   const algorithm = finding.algorithm ?? "";
   const hit = CLASSICAL_BREAKS.find((row) => row.algorithm.test(algorithm));
   if (hit) return hit.reason;

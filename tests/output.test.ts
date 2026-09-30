@@ -413,6 +413,14 @@ describe("toCbom", () => {
   });
 });
 
+/** A real SPKI public key (the RSA-2048 fixture certificate's), so the scanner parses and classifies it. */
+const PUBLIC_KEY_PEM = String(
+  new X509Certificate(readFileSync(fileURLToPath(new URL("./fixtures/certs/rsa2048.pem", import.meta.url)))).publicKey.export({
+    type: "spki",
+    format: "pem",
+  }),
+).trim();
+
 const RULE_FIXTURE = [
   'import crypto from "node:crypto";',
   'import jwt from "jsonwebtoken";',
@@ -422,27 +430,50 @@ const RULE_FIXTURE = [
   "const key = `-----BEGIN RSA PRIVATE KEY-----",
   "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun",
   "-----END RSA PRIVATE KEY-----`;",
-  "const pub = `-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqh\n-----END PUBLIC KEY-----`;",
+  `const pub = \`${PUBLIC_KEY_PEM}\`;`,
 ].join("\n");
 
 type SarifLog = {
   runs: Array<{
     tool: { driver: { informationUri: string; rules: Array<{ id: string; shortDescription: { text: string }; helpUri: string; properties: Record<string, unknown> }> } };
-    results: Array<{ ruleId: string; level: string; properties: Record<string, string>; locations?: Array<{ physicalLocation: { artifactLocation: { uri: string; uriBaseId?: string } } }> }>;
+    results: Array<{
+      ruleId: string;
+      level: string;
+      message: { text: string };
+      properties: Record<string, string>;
+      locations?: Array<{ physicalLocation: { artifactLocation: { uri: string; uriBaseId?: string } } }>;
+    }>;
   }>;
 };
 
 describe("toSarif rule identity (real scanner output)", () => {
   const log = (): SarifLog => JSON.parse(toSarif(buildReport("repo", scanContent("src/app.ts", RULE_FIXTURE), AT))) as SarifLog;
 
-  it("gives MD5, SHA-1, DES and RC4, RS256 and HS256, and private and public keys their own rules", () => {
+  it("gives each detector its own rule: weak hash, weak cipher, RS256, HS256, private key and public key", () => {
     const run = log().runs[0];
     const ruleOf = (predicate: (r: { properties: Record<string, string> }) => boolean): string | undefined =>
       run?.results.find(predicate)?.ruleId;
-    const ids = run?.results.map((r) => r.ruleId) ?? [];
-    expect(new Set(ids).size).toBe(ids.length); // one result per rule in this fixture
-    expect(run?.tool.driver.rules).toHaveLength(ids.length);
+    const ids = [...new Set(run?.results.map((r) => r.ruleId) ?? [])].sort();
+    expect(ids).toEqual([
+      "jwt/jsonwebtoken/hmac",
+      "jwt/jsonwebtoken/rsa",
+      "keys/private-key-block",
+      "keys/public-key-block",
+      "source/node-crypto/weak-cipher",
+      "source/node-crypto/weak-hash",
+    ]);
+    expect(run?.tool.driver.rules.map((rule) => rule.id)).toEqual(ids);
     expect(ruleOf((r) => r.properties.evidence === "src/app.ts:6")).not.toBe(ruleOf((r) => r.properties.evidence === "src/app.ts:9"));
+  });
+
+  it("describes source rules from the scanner's catalogue, so a shared rule never takes one result's detail", () => {
+    const run = log().runs[0];
+    const weakHash = run?.tool.driver.rules.find((rule) => rule.id === "source/node-crypto/weak-hash");
+    expect(weakHash?.shortDescription.text).toBe("Weak hash algorithm via node:crypto");
+    const messages = run?.results.filter((r) => r.ruleId === "source/node-crypto/weak-hash").map((r) => r.message.text) ?? [];
+    expect(messages).toHaveLength(2);
+    expect(messages.some((text) => text.includes("(md5)"))).toBe(true);
+    expect(messages.some((text) => text.includes("(sha1)"))).toBe(true);
   });
 
   it("builds rule metadata from the rule id alone, so result order cannot change it", () => {
@@ -567,7 +598,12 @@ describe("failsThreshold", () => {
 
 describe("report rule ids", () => {
   it("derives distinct rule ids per kind when a scanner sets none", () => {
-    const report = buildReport("repo", scanContent("src/app.ts", RULE_FIXTURE), AT);
+    const withoutRuleIds = scanContent("src/app.ts", RULE_FIXTURE).map((finding) => {
+      const bare = { ...finding };
+      delete bare.ruleId;
+      return bare;
+    });
+    const report = buildReport("repo", withoutRuleIds, AT);
     const ids = report.findings.map((f) => f.ruleId);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).not.toContain("source/csw-src");

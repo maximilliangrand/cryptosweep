@@ -15,6 +15,7 @@
 import { ruleIdFromLabel } from "../report";
 import type { Finding, Report, Severity } from "../report";
 import { entryForRuleId } from "../scanners/deps/registry";
+import { SOURCE_RULES } from "../scanners/source-rules";
 import { VERSION } from "../version";
 
 /** Canonical home of the project; tool metadata and rule help links point here. */
@@ -47,19 +48,35 @@ const SEVERITY_TO_SCORE: Record<Severity, number> = {
 
 const SEVERITY_ORDER: readonly Severity[] = ["critical", "high", "medium", "low", "info"];
 
-/** Short descriptions for the rules the built-in scanners emit. Anything else is described from its id. */
-const RULE_DESCRIPTIONS: Readonly<Record<string, string>> = {
-  "tls/leaf-public-key": "Leaf certificate public key (quantum or classical weakness)",
-  "tls/leaf-signature": "Leaf certificate signature algorithm",
-  "tls/chain-classical": "Intermediate certificates use classical cryptography",
-  "tls/negotiated-protocol": "Negotiated TLS protocol version",
-  "tls/hybrid-kex": "Hybrid post-quantum key exchange support",
-  "tls/leaf-expired": "Leaf certificate has expired",
-  "tls/leaf-expiring": "Leaf certificate expires within 30 days",
-  "tls/no-leaf": "No leaf certificate could be read",
-  "source/unreadable-path": "Paths the source scan could not read",
-  "source/scan-truncated": "Source scan stopped at a resource limit",
-};
+/**
+ * Descriptions for the rules the built-in scanners emit: the TLS and
+ * dependency-coverage rules here, and every source, JWT and key rule from the
+ * source scanner's own catalogue. Anything else is described from its id.
+ */
+interface RuleText {
+  short: string;
+  full?: string;
+}
+
+const RULE_DESCRIPTIONS: ReadonlyMap<string, RuleText> = new Map<string, RuleText>([
+  ["tls/leaf-public-key", { short: "Leaf certificate public key (quantum or classical weakness)" }],
+  ["tls/leaf-signature", { short: "Leaf certificate signature algorithm" }],
+  ["tls/chain-classical", { short: "Intermediate certificates use classical cryptography" }],
+  ["tls/intermediate-signature", { short: "Intermediate certificate signed with a broken or unrecognized algorithm" }],
+  ["tls/chain-untrusted", { short: "Certificate chain did not validate" }],
+  ["tls/negotiated-protocol", { short: "Negotiated TLS protocol version" }],
+  ["tls/hybrid-kex", { short: "Post-quantum key exchange support" }],
+  ["tls/leaf-expired", { short: "Leaf certificate has expired" }],
+  ["tls/leaf-expiring", { short: "Leaf certificate expires within 30 days" }],
+  ["tls/no-leaf", { short: "No leaf certificate could be read" }],
+  ["deps/unsupported-manifest", { short: "Dependency files in formats the dependency scan does not parse" }],
+  ["deps/manifest-too-large", { short: "Dependency manifests above the size limit were not parsed" }],
+  ["deps/scan-truncated", { short: "Dependency scan stopped at a resource limit" }],
+  ...SOURCE_RULES.map((rule): [string, RuleText] => [
+    rule.id,
+    { short: rule.title, full: rule.recommendation },
+  ]),
+]);
 
 const CATEGORY_NOUN: Readonly<Record<string, string>> = {
   tls: "TLS",
@@ -85,9 +102,9 @@ interface SarifRule {
  * algorithm (`source/sha-1`) is described by that algorithm's own spelling,
  * which the id determines.
  */
-function describeRule(ruleId: string, category: string, findings: readonly Finding[]): { short: string; full?: string } {
-  const known = RULE_DESCRIPTIONS[ruleId];
-  if (known) return { short: known };
+function describeRule(ruleId: string, category: string, findings: readonly Finding[]): RuleText {
+  const known = RULE_DESCRIPTIONS.get(ruleId);
+  if (known) return known;
   const entry = category === "deps" ? entryForRuleId(ruleId) : undefined;
   if (entry) return { short: `Dependency ${entry.name} (${entry.ecosystem}) uses quantum-relevant cryptography`, full: entry.reason };
   const algorithm = findings.map((f) => f.algorithm).find((a) => a !== undefined && ruleIdFromLabel(category, a) === ruleId);

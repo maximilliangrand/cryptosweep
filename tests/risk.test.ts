@@ -229,13 +229,20 @@ describe("harvest-now classification from structured fields", () => {
 });
 
 describe("present-day breaks are act-now, never on the quantum clock", () => {
+  /** A real SPKI public key (the RSA-2048 fixture certificate's), so the source scanner parses and classifies it. */
+  const PUBLIC_KEY_PEM = String(
+    new X509Certificate(readFileSync(fileURLToPath(new URL("./fixtures/certs/rsa2048.pem", import.meta.url)))).publicKey.export({
+      type: "spki",
+      format: "pem",
+    }),
+  ).trim();
   const SOURCE = [
     'import jwt from "jsonwebtoken";',
     'jwt.verify(t, k, { algorithms: ["none"] });',
     "const key = `-----BEGIN RSA PRIVATE KEY-----",
     "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun",
     "-----END RSA PRIVATE KEY-----`;",
-    "const pub = `-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqh\n-----END PUBLIC KEY-----`;",
+    `const pub = \`${PUBLIC_KEY_PEM}\`;`,
   ].join("\n");
 
   it("classifies JWT alg none and a committed private key (real scanContent output) as classical", () => {

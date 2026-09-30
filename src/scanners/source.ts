@@ -555,6 +555,7 @@ function toFinding(hit: RuleHit, relPath: string, context: FileContext, lines: L
     pq_status: a.pq,
     confidence,
     ...(a.algorithm ? { algorithm: a.algorithm } : {}),
+    ...(a.rule.findingUsage.length > 0 ? { usage: [...a.rule.findingUsage] } : {}),
     recommendation: a.recommendation,
     ...(a.references.length > 0 ? { references: a.references } : {}),
   };
