@@ -298,12 +298,17 @@ describe("toCbom from real scanner output", () => {
     ]);
     const doc = JSON.parse(toCbom(buildReport("repo", findings, AT))) as CbomDoc;
     const libraries = doc.components.filter((c) => c.type === "library");
-    expect(libraries.map((c) => c.purl)).toEqual(["pkg:npm/tweetnacl", "pkg:pypi/pynacl"]);
+    // The scanner's structured coordinates carry the pinned version into the purl.
+    expect(libraries.map((c) => c.purl)).toEqual(["pkg:npm/tweetnacl@1.0.3", "pkg:pypi/pynacl@1.5.0"]);
+    expect(libraries.map((c) => c.version)).toEqual(["1.0.3", "1.5.0"]);
     const byRef = new Map(doc.components.map((c) => [c["bom-ref"], c]));
-    const provided = doc.dependencies?.find((d) => d.ref === "pkg:npm/tweetnacl")?.provides ?? [];
+    const provided = doc.dependencies?.find((d) => d.ref === "pkg:npm/tweetnacl@1.0.3")?.provides ?? [];
     expect(provided.map((ref) => byRef.get(ref)?.name)).toEqual(["X25519", "Ed25519"]);
     expect(byRef.get(provided[0] ?? "")?.cryptoProperties?.algorithmProperties?.primitive).toBe("key-agree");
-    expect(doc.dependencies?.find((d) => d.ref === "target")?.dependsOn).toEqual(["pkg:npm/tweetnacl", "pkg:pypi/pynacl"]);
+    expect(doc.dependencies?.find((d) => d.ref === "target")?.dependsOn).toEqual([
+      "pkg:npm/tweetnacl@1.0.3",
+      "pkg:pypi/pynacl@1.5.0",
+    ]);
   });
 
   it("puts a pinned structured version into the purl and keeps a range as a property", () => {

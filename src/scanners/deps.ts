@@ -18,7 +18,7 @@ import type { FileHandle } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import type { Confidence, Finding, PqStatus, Reference, Severity } from "../report";
 import type { Ecosystem, RegistryEntry } from "./deps/registry";
-import { lookupEntry } from "./deps/registry";
+import { depsRuleId, lookupEntry } from "./deps/registry";
 import { REFS } from "../crypto";
 import { parsePackageJson, parsePackageLock, parsePnpmLock, parseYarnLock, type ParsedDep } from "./deps/parsers/npm";
 import {
@@ -164,7 +164,7 @@ function toFinding(dep: ParsedDep, entry: RegistryEntry, ids: IdAllocator): Find
   const a = assess(dep, entry);
   return {
     id: ids.next(),
-    ruleId: `deps/${dep.ecosystem}-${entry.name}`,
+    ruleId: depsRuleId(entry),
     severity: a.severity,
     category: "deps",
     title: `${entry.name} (${dep.ecosystem}): ${entry.reason}`,
@@ -173,8 +173,10 @@ function toFinding(dep: ParsedDep, entry: RegistryEntry, ids: IdAllocator): Find
     pq_status: a.pq_status,
     confidence: a.confidence,
     recommendation: a.recommendation,
+    dependency: { ecosystem: dep.ecosystem, name: dep.name, ...(dep.version ? { version: dep.version } : {}) },
     // Entry-specific provenance first, then the generic standards for the
-    // assessed posture (so rustls >= 0.23, now transitional, keeps FIPS 203).
+    // assessed posture (so a library at or above its `fixedIn`, now
+    // transitional, keeps FIPS 203).
     references: dedupeByLabel([...(entry.references ?? []), ...referencesFor(a.pq_status)]),
   };
 }

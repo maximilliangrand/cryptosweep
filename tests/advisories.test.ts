@@ -125,9 +125,39 @@ describe("annotateWithAdvisories joins on structured identity", () => {
     expect(queried.sort()).toEqual(["4.8", "4.9"]);
   });
 
-  it("fails closed when the join is ambiguous", async () => {
+  it("sets structured coordinates on every dependency finding, so each one joins its own declaration", async () => {
     const deps = [dep({ version: "4.8" }), dep({ version: "4.9" })];
     const findings = matchDeps(deps);
+    expect(findings.map((f) => f.dependency)).toEqual([
+      { ecosystem: "python", name: "rsa", version: "4.8" },
+      { ecosystem: "python", name: "rsa", version: "4.9" },
+    ]);
+    const queried: string[] = [];
+    const perQuery = (_u: string, init: Init): Promise<Fetched> => {
+      const body = JSON.parse(init.body) as { queries: Array<{ version: string }> };
+      queried.push(...body.queries.map((q) => q.version));
+      const results = body.queries.map(() => ({ vulns: [{ id: "GHSA-test" }] }));
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ results }) });
+    };
+    const out = await annotateWithAdvisories(findings, deps, { enabled: true, endpoint: "http://t", fetchImpl: perQuery });
+    expect(queried.sort()).toEqual(["4.8", "4.9"]);
+    expect(out.every((f) => /GHSA-test/.test(f.recommendation))).toBe(true);
+  });
+
+  it("joins a Python dependency declared under a non-canonical name", async () => {
+    const deps = [dep({ name: "PyJWT", version: "2.8.0" })];
+    const [after] = await annotateWithAdvisories(matchDeps(deps), deps, options);
+    expect(after?.recommendation).toMatch(/GHSA-test/);
+  });
+
+  it("fails closed when the join is ambiguous", async () => {
+    const deps = [dep({ version: "4.8" }), dep({ version: "4.9" })];
+    // A finding without structured coordinates cannot tell the two declarations apart.
+    const findings = matchDeps(deps).map((finding) => {
+      const bare = { ...finding };
+      delete bare.dependency;
+      return bare;
+    });
     const spy = vi.fn(vuln);
     const out = await annotateWithAdvisories(findings, deps, { enabled: true, endpoint: "http://t", fetchImpl: spy });
     expect(spy).not.toHaveBeenCalled();
