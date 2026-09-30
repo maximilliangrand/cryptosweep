@@ -130,6 +130,16 @@ describe("MCP scan tool", () => {
     expect(text).toMatch(/data class Legal \/ privileged/);
   });
 
+  it("applies a migration time and reports coverage, and scopes an empty result", async () => {
+    const withYears = await callTool("scan", { target: "pinned", migrationYears: 2 });
+    expect(withYears).toMatch(/Coverage:\n {2}source: .*\(complete\)\n {2}deps: .*\(complete\)/);
+    await expect(callTool("scan", { target: "pinned", migrationYears: 0 })).rejects.toThrow(/migrationYears must be a number of years/);
+    await mkdir(join(dir, "empty"), { recursive: true });
+    const empty = await callTool("scan", { target: "empty" });
+    expect(empty).toContain("No findings from the checks that ran.");
+    expect(empty).toContain("Only the constructs these checks detect were examined");
+  });
+
   it("resolves relative filesystem targets against the root", async () => {
     const text = await callTool("scan", { target: "pinned" });
     expect(text).toContain("node-rsa");

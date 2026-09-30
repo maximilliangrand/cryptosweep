@@ -16,6 +16,7 @@ import { assessRisk, assessThreat } from "../src/model/risk";
 import type { CryptoAsset } from "../src/model/risk";
 import { toCbom } from "../src/output/cbom";
 import { toSarif } from "../src/output/sarif";
+import { describeCoverage } from "../src/orchestrate";
 import { scanContent } from "../src/scanners/source";
 import { analyzeTls, parseCertificate } from "../src/scanners/tls";
 import type { CertInfo, TlsScanResult } from "../src/scanners/tls";
@@ -165,5 +166,38 @@ describe("TLS structured fields reach the risk engine and the CBOM", () => {
     const log = JSON.parse(toSarif(report)) as { runs: Array<{ tool: { driver: { rules: Array<{ id: string; shortDescription: { text: string } }> } } }> };
     const rule = log.runs[0]?.tool.driver.rules.find((r) => r.id === "tls/intermediate-signature");
     expect(rule?.shortDescription.text).toBe("Intermediate certificate signed with a broken or unrecognized algorithm");
+  });
+});
+
+describe("scan coverage recorded on the report", () => {
+  it("marks the TLS check partial when post-quantum key exchange could not be tested", () => {
+    const target = { kind: "host" as const, host: "example.com", port: 443 };
+    const untested = tls({ groupProbes: [{ group: "X25519MLKEM768", outcome: "untestable", detail: "local OpenSSL lacks it" }] });
+    const [partial] = describeCoverage(target, untested);
+    expect(partial).toMatchObject({ check: "tls", complete: false });
+    expect(partial?.note).toMatch(/local TLS runtime lacks ML-KEM groups/);
+
+    const tested = tls({ groupProbes: [{ group: "X25519MLKEM768", outcome: "accepted" }] });
+    expect(describeCoverage(target, tested)).toEqual([
+      expect.objectContaining({ check: "tls", complete: true, scope: expect.stringMatching(/^example\.com:443: one handshake/) }),
+    ]);
+  });
+
+  it("marks the source check partial from the scanner's coverage findings", () => {
+    const gap: Finding = {
+      id: "CSW-COV-001",
+      ruleId: "source/binary-skipped",
+      severity: "info",
+      category: "source",
+      title: "2 binary-looking file(s) were not analysed",
+      evidence: "a.der, b.jks",
+      pq_status: "unknown",
+      recommendation: "r",
+    };
+    const coverage = describeCoverage({ kind: "path", dir: "/repo" }, [gap]);
+    expect(coverage.map((c) => [c.check, c.complete, c.note])).toEqual([
+      ["source", false, gap.title],
+      ["deps", true, undefined],
+    ]);
   });
 });

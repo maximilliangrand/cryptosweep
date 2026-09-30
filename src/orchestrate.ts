@@ -9,7 +9,7 @@ import { statSync } from "node:fs";
 import { isIPv6 } from "node:net";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import type { Finding } from "./report";
+import type { CoverageEntry, Finding } from "./report";
 import { scanTls } from "./scanners/tls";
 import { scanSource } from "./scanners/source";
 import { scanDeps } from "./scanners/deps";
@@ -68,6 +68,16 @@ export function parseTimeoutMs(value: unknown, name = "timeout"): number {
 /** The assumed year a cryptographically relevant quantum computer exists. */
 export function parseCrqcYear(value: unknown, name = "crqcYear"): number {
   return parseIntegerOption(value, name, 2020, 2100);
+}
+
+/** Mosca's Y: years a migration takes, a positive number up to 50 (e.g. `3` or `2.5`). */
+export function parseMigrationYears(value: unknown, name = "migrationYears"): number {
+  const parsed =
+    typeof value === "number" ? value : typeof value === "string" && /^\d{1,2}(?:\.\d+)?$/.test(value.trim()) ? Number(value) : NaN;
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 50) {
+    throw new Error(`${name} must be a number of years greater than 0 and at most 50 (got "${String(value)}")`);
+  }
+  return parsed;
 }
 
 function expandHome(input: string): string {
@@ -200,4 +210,43 @@ export async function scanTarget(target: string | Target, options: ScanTargetOpt
     case "remote":
       return scanClonedRepo(parsed.url, options);
   }
+}
+
+/** The info findings each scanner emits for what it could not examine, by check. */
+const COVERAGE_GAP_RULES: Readonly<Record<string, "source" | "deps">> = {
+  "source/unreadable-path": "source",
+  "source/scan-truncated": "source",
+  "source/file-too-large": "source",
+  "source/binary-skipped": "source",
+  "source/findings-capped": "source",
+  "source/ast-fallback": "source",
+  "deps/unsupported-manifest": "deps",
+  "deps/manifest-too-large": "deps",
+  "deps/scan-truncated": "deps",
+};
+
+const SOURCE_SCOPE =
+  "source files: JavaScript/TypeScript parsed to an AST; Python, Go and JVM languages (Java, Kotlin, Scala, Groovy) matched by regex; " +
+  "other text files by the JavaScript regex sweep; PEM key blocks in every file";
+const DEPS_SCOPE = "dependency manifests and lockfiles for npm, PyPI and Cargo, matched against the built-in registry";
+
+function coverageOf(check: "source" | "deps", scope: string, findings: readonly Finding[]): CoverageEntry {
+  const gaps = findings.filter((f) => f.ruleId !== undefined && COVERAGE_GAP_RULES[f.ruleId] === check).map((f) => f.title);
+  return gaps.length === 0 ? { check, scope, complete: true } : { check, scope, complete: false, note: gaps.join("; ") };
+}
+
+/**
+ * What the scan of `target` examined, for the report's coverage section, so an
+ * empty or short result says what it covers. Gaps come from the coverage
+ * findings the scanners emit; the TLS entry is partial when post-quantum key
+ * exchange could not be determined.
+ */
+export function describeCoverage(target: Target, findings: readonly Finding[]): CoverageEntry[] {
+  if (target.kind !== "host") return [coverageOf("source", SOURCE_SCOPE, findings), coverageOf("deps", DEPS_SCOPE, findings)];
+  const port = findings.find((f) => f.location?.port !== undefined)?.location?.port ?? target.port;
+  const endpoint = `${target.host.includes(":") ? `[${target.host}]` : target.host}:${port}`;
+  const scope = `${endpoint}: one handshake (the negotiated version, cipher suite and served chain) and one TLS 1.3 probe per ML-KEM group`;
+  const kex = findings.find((f) => f.ruleId === "tls/hybrid-kex");
+  if (kex && kex.pq_status !== "unknown") return [{ check: "tls", scope, complete: true }];
+  return [{ check: "tls", scope, complete: false, note: kex?.title ?? "post-quantum key exchange was not assessed" }];
 }

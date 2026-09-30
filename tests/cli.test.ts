@@ -85,6 +85,8 @@ describe("cryptosweep CLI", () => {
     [["--crqc-year", "1990"], /--crqc-year must be an integer from 2020 to 2100/],
     [["--fail-on", "bogus"], /--fail-on must be one of/],
     [["--data-class", "nope"], /--data-class must be one of/],
+    [["--migration-years", "0"], /--migration-years must be a number of years greater than 0 and at most 50 \(got "0"\)/],
+    [["--migration-years", "soon"], /--migration-years must be a number of years/],
     [["--port", "8443"], /--port applies only to hostname\/URL \(TLS\) targets/],
     [["--timeout", "5000"], /--timeout applies only to hostname\/URL \(TLS\) targets/],
     [["--md", "same.out"], /--out and --md would both write same\.out/],
@@ -171,13 +173,23 @@ describe("cryptosweep CLI", () => {
       "2040",
       "--data-class",
       "legal-privileged",
+      "--migration-years",
+      "2.5",
       "--risk",
       riskFile,
     ]);
     expect(result.code).toBe(0);
     expect(result.stderr).toMatch(/CRQC assumed 2040/);
     expect(JSON.parse(readFileSync(riskFile, "utf8"))).toMatchObject({
-      assumptions: { crqcYear: 2040 },
+      assumptions: { crqcYear: 2040, migrationYears: { default: 2.5 } },
     });
+  });
+
+  it("states what the scan covered in the Markdown report", async () => {
+    const result = await run(["scan", project]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toMatch(/## Coverage/);
+    expect(result.stdout).toMatch(/- source: source files: JavaScript\/TypeScript parsed to an AST/);
+    expect(result.stdout).toMatch(/- deps: dependency manifests and lockfiles .* \(complete\)/);
   });
 });

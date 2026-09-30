@@ -8,7 +8,7 @@
  * no side effects; `src/mcp.ts` is the executable entry that calls `serve()`.
  *
  * Tools:
- *   - scan(target, dataClass?, crqcYear?)
+ *   - scan(target, dataClass?, crqcYear?, migrationYears?)
  *   - data_classes()
  *
  * Everything except JSON-RPC frames goes to stderr; stdout is protocol-only.
@@ -34,9 +34,9 @@ import { homedir } from "node:os";
 import { isAbsolute, parse, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
-import { buildReport } from "./report";
+import { NO_FINDINGS_MESSAGE, buildReport, coverageLines, emptyResultNote } from "./report";
 import type { Report } from "./report";
-import { classifyTarget, parseCrqcYear, scanTarget } from "./orchestrate";
+import { classifyTarget, describeCoverage, parseCrqcYear, parseMigrationYears, scanTarget } from "./orchestrate";
 import type { Target } from "./orchestrate";
 import { assessRisk } from "./model/risk";
 import type { RiskModel } from "./model/risk";
@@ -66,6 +66,12 @@ export const TOOLS = [
           minimum: 2020,
           maximum: 2100,
           description: "assumed year a quantum computer can break current crypto (default 2035)",
+        },
+        migrationYears: {
+          type: "number",
+          exclusiveMinimum: 0,
+          maximum: 50,
+          description: "years a migration takes (Mosca's Y), applied to every asset (default 3 for key establishment, 5 for signatures)",
         },
       },
       required: ["target"],
@@ -241,6 +247,10 @@ export async function callTool(
       args.crqcYear === undefined || args.crqcYear === null
         ? undefined
         : parseCrqcYear(args.crqcYear);
+    const migrationYears =
+      args.migrationYears === undefined || args.migrationYears === null
+        ? undefined
+        : parseMigrationYears(args.migrationYears);
     const config = loadConfig();
     const parsed = mcpTarget(target, config);
     // allowPrivate and advisories come only from the operator's config. Tool
@@ -251,8 +261,8 @@ export async function callTool(
       advisories: config.advisories,
       signal,
     });
-    const report = buildReport(target, findings);
-    const profile = defaultProfile(report.scanned_at, { dataClassId: dataClass, crqcYear });
+    const report = buildReport(target, findings, new Date(), describeCoverage(parsed, findings));
+    const profile = defaultProfile(report.scanned_at, { dataClassId: dataClass, crqcYear, migrationYears });
     const risk = assessRisk(target, report.findings, profile);
     return formatScan(report, risk);
   }
@@ -279,6 +289,11 @@ function formatScan(report: Report, risk: RiskModel): string {
       lines.push(`  [${f.severity}/${f.confidence ?? "medium"}] ${f.title}  (${f.evidence})`);
     }
     if (report.findings.length > 12) lines.push(`  ... and ${report.findings.length - 12} more.`);
+  } else {
+    lines.push(``, NO_FINDINGS_MESSAGE, emptyResultNote(report));
+  }
+  if (report.coverage && report.coverage.length > 0) {
+    lines.push(``, `Coverage:`, ...coverageLines(report.coverage).map((line) => `  ${line}`));
   }
   // Sanitizing per line, after assembly, covers every interpolated field at once.
   return lines.map(safeLine).join("\n");

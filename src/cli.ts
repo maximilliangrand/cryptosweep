@@ -19,7 +19,15 @@ import { toHtml } from "./output/viewer";
 import { assessRisk } from "./model/risk";
 import type { RiskModel } from "./model/risk";
 import { DATA_CLASSES, defaultProfile, isDataClassId } from "./model/estate";
-import { classifyTarget, parseCrqcYear, parsePort, parseTimeoutMs, scanTarget } from "./orchestrate";
+import {
+  classifyTarget,
+  describeCoverage,
+  parseCrqcYear,
+  parseMigrationYears,
+  parsePort,
+  parseTimeoutMs,
+  scanTarget,
+} from "./orchestrate";
 import type { ScanTargetOptions, Target } from "./orchestrate";
 import { renderHtml, renderText } from "./email/render";
 import { sendEmail } from "./email/resend";
@@ -37,6 +45,7 @@ interface ScanOptions {
   advisories?: boolean;
   dataClass?: string;
   crqcYear?: string | number;
+  migrationYears?: string | number;
   risk?: string | number;
   port?: string | number;
   timeout?: string | number;
@@ -53,6 +62,7 @@ interface ScanPlan {
   scan: ScanTargetOptions;
   dataClass?: string;
   crqcYear?: number;
+  migrationYears?: number;
   failOn?: Severity;
   outputs: Partial<Record<OutputFlag, string>>;
 }
@@ -93,6 +103,8 @@ function planScan(input: string, options: ScanOptions): ScanPlan {
     throw new Error(`--data-class must be one of ${DATA_CLASSES.map((c) => c.id).join(", ")}`);
   }
   const crqcYear = options.crqcYear === undefined ? undefined : parseCrqcYear(options.crqcYear, "--crqc-year");
+  const migrationYears =
+    options.migrationYears === undefined ? undefined : parseMigrationYears(options.migrationYears, "--migration-years");
   const port = options.port === undefined ? undefined : parsePort(options.port, "--port");
   const timeoutMs = options.timeout === undefined ? undefined : parseTimeoutMs(options.timeout, "--timeout");
 
@@ -113,6 +125,7 @@ function planScan(input: string, options: ScanOptions): ScanPlan {
     },
     dataClass: options.dataClass === undefined ? undefined : String(options.dataClass),
     crqcYear,
+    migrationYears,
     failOn,
     outputs: outputPaths(options),
   };
@@ -141,8 +154,12 @@ async function runScan(target: string, options: ScanOptions): Promise<void> {
     }
 
     const findings = await scanTarget(plan.target, plan.scan);
-    const report = buildReport(target, findings);
-    const profile = defaultProfile(report.scanned_at, { dataClassId: plan.dataClass, crqcYear: plan.crqcYear });
+    const report = buildReport(target, findings, new Date(), describeCoverage(plan.target, findings));
+    const profile = defaultProfile(report.scanned_at, {
+      dataClassId: plan.dataClass,
+      crqcYear: plan.crqcYear,
+      migrationYears: plan.migrationYears,
+    });
     const risk = assessRisk(target, report.findings, profile);
 
     if (!(await writeOutputs(plan, report, risk))) {
@@ -259,6 +276,10 @@ cli
   .option(
     "--crqc-year <year>",
     "Assumed year a cryptographically-relevant quantum computer exists, 2020-2100 (default 2035)",
+  )
+  .option(
+    "--migration-years <years>",
+    "Years a migration takes (Mosca's Y), applied to every asset (default 3 for key establishment, 5 for signatures)",
   )
   .option("--risk <file>", "Write the crypto-agility risk model (Mosca clock + harvest ledger) to <file>")
   .option("--port <port>", "TLS port, 1-65535 (defaults to 443 or the port in the target)")
