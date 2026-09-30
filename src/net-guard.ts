@@ -7,38 +7,76 @@
  * data or map the network. This module resolves a target and refuses addresses
  * that are not publicly routable, unless the caller explicitly opts in (which
  * is reasonable for local development against `localhost`).
+ *
+ * The guard fails closed: a name that does not resolve, an address it cannot
+ * parse, and a numeric host written in any form other than a canonical dotted
+ * quad are all refused rather than waved through.
  */
 import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 
-/** Parse a dotted IPv4 string into four octets, or null if it is not IPv4. */
+/** An address a vetted host resolved to, in the form `net`/`tls` connect accepts. */
+export interface ResolvedAddress {
+  address: string;
+  family: 4 | 6;
+}
+
+/**
+ * Parse a canonical dotted-quad IPv4 string (`127.0.0.1`) into four octets, or
+ * null. Anything else — leading zeros, hex, fewer than four parts, a bare
+ * integer — is rejected: those forms mean different addresses to different
+ * parsers (`0177.0.0.1` is 177.0.0.1 to `Number()` but 127.0.0.1 to glibc's
+ * inet_aton), so the guard never interprets them.
+ */
 function parseIpv4(ip: string): [number, number, number, number] | null {
   const parts = ip.split(".");
   if (parts.length !== 4) return null;
-  const octets = parts.map((p) => Number(p));
-  if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  const octets: number[] = [];
+  for (const part of parts) {
+    if (!/^(?:0|[1-9]\d{0,2})$/.test(part)) return null;
+    const value = Number(part);
+    if (value > 255) return null;
+    octets.push(value);
+  }
   return octets as [number, number, number, number];
 }
 
-/** True for four IPv4 octets that are not safe to reach from a server context. */
-function isBlockedIpv4Octets(octets: readonly number[]): boolean {
-  const [a = 0, b = 0] = octets;
-  if (a === 0) return true; // "this network" / unspecified
-  if (a === 10) return true; // private
-  if (a === 127) return true; // loopback
-  if (a === 169 && b === 254) return true; // link-local incl. 169.254.169.254 metadata
-  if (a === 172 && b >= 16 && b <= 31) return true; // private
-  if (a === 192 && b === 168) return true; // private
-  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT (100.64/10)
-  if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking
-  if (a >= 224) return true; // multicast + reserved
-  return false;
+function ipv4ToInt(octets: readonly number[]): number {
+  const [a = 0, b = 0, c = 0, d = 0] = octets;
+  return ((a << 24) | (b << 16) | (c << 8) | d) >>> 0;
 }
 
-/** True for an IPv4 address that is not safe to reach from a server context. */
-function isBlockedIpv4(ip: string): boolean {
-  const octets = parseIpv4(ip);
-  if (!octets) return false;
-  return isBlockedIpv4Octets(octets);
+/**
+ * IPv4 blocks from the IANA special-purpose registry that are not safe or not
+ * meaningful to reach from a server context.
+ */
+const BLOCKED_IPV4: ReadonlyArray<readonly [string, number]> = [
+  ["0.0.0.0", 8], // "this network", incl. the unspecified address
+  ["10.0.0.0", 8], // private
+  ["100.64.0.0", 10], // CGNAT shared address space
+  ["127.0.0.0", 8], // loopback
+  ["169.254.0.0", 16], // link-local, incl. 169.254.169.254 cloud metadata
+  ["172.16.0.0", 12], // private
+  ["192.0.0.0", 24], // IETF protocol assignments, incl. 192.0.0.192 (Oracle Cloud metadata)
+  ["192.0.2.0", 24], // documentation (TEST-NET-1)
+  ["192.88.99.0", 24], // deprecated 6to4 relay anycast
+  ["192.168.0.0", 16], // private
+  ["198.18.0.0", 15], // benchmarking
+  ["198.51.100.0", 24], // documentation (TEST-NET-2)
+  ["203.0.113.0", 24], // documentation (TEST-NET-3)
+  ["224.0.0.0", 4], // multicast
+  ["240.0.0.0", 4], // reserved, incl. 255.255.255.255 limited broadcast
+];
+
+const BLOCKED_IPV4_RANGES = BLOCKED_IPV4.map(([base, bits]) => {
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return { network: (ipv4ToInt(parseIpv4(base) ?? []) & mask) >>> 0, mask };
+});
+
+/** True for four IPv4 octets that are not safe to reach from a server context. */
+function isBlockedIpv4Octets(octets: readonly number[]): boolean {
+  const value = ipv4ToInt(octets);
+  return BLOCKED_IPV4_RANGES.some(({ network, mask }) => ((value & mask) >>> 0) === network);
 }
 
 /**
@@ -88,64 +126,146 @@ function parseIpv6(ip: string): number[] | null {
   return [...headBytes, ...new Array<number>(missing).fill(0), ...restBytes];
 }
 
-/** True if the first `count` bytes are all zero. */
-function zeroPrefix(bytes: readonly number[], count: number): boolean {
-  for (let i = 0; i < count; i += 1) if (bytes[i] !== 0) return false;
-  return true;
+/** True if `bytes` starts with the first `bits` bits of `prefix`. */
+function hasPrefix(bytes: readonly number[], prefix: readonly number[], bits: number): boolean {
+  const whole = Math.floor(bits / 8);
+  for (let i = 0; i < whole; i += 1) if (bytes[i] !== prefix[i]) return false;
+  const remainder = bits % 8;
+  if (remainder === 0) return true;
+  const mask = (0xff << (8 - remainder)) & 0xff;
+  return ((bytes[whole] ?? 0) & mask) === ((prefix[whole] ?? 0) & mask);
 }
+
+function ipv6Prefix(text: string, bits: number): { bytes: number[]; bits: number } {
+  return { bytes: parseIpv6(text) ?? [], bits };
+}
+
+/** IPv6 prefixes whose last four bytes are the IPv4 address the kernel really connects to. */
+const IPV4_EMBEDDING_IPV6 = [
+  ipv6Prefix("::ffff:0:0", 96), // IPv4-mapped
+  ipv6Prefix("::ffff:0:0:0", 96), // IPv4-translated (SIIT)
+  ipv6Prefix("64:ff9b::", 96), // NAT64 well-known prefix
+];
+
+/** 6to4 embeds the IPv4 endpoint in bytes 2..5. */
+const SIX_TO_FOUR = ipv6Prefix("2002::", 16);
+
+/** Only global unicast is publicly routable; everything outside 2000::/3 is refused. */
+const GLOBAL_UNICAST = ipv6Prefix("2000::", 3);
+
+/** Special-purpose blocks carved out of global unicast that are not globally reachable. */
+const NON_GLOBAL_IPV6 = [
+  ipv6Prefix("2001::", 23), // IETF protocol assignments, incl. Teredo 2001::/32 and benchmarking
+  ipv6Prefix("2001:db8::", 32), // documentation
+  ipv6Prefix("3fff::", 20), // documentation (RFC 9637)
+];
 
 /**
  * True for an IPv6 address that is not safe to reach. Every IPv4-carrying form
- * (IPv4-mapped, IPv4-compatible, NAT64, 6to4) is unwrapped and classified by the
- * IPv4 rules, because that is the address the kernel will actually connect to.
+ * (IPv4-mapped, IPv4-translated, NAT64, 6to4) is unwrapped and classified by
+ * the IPv4 rules, because that is the address the kernel will actually connect
+ * to. Everything outside global unicast 2000::/3 is refused outright: that
+ * covers ::/128, ::1, the deprecated IPv4-compatible ::/96, the local-use NAT64
+ * prefix 64:ff9b:1::/48 (not globally reachable by definition, and its IPv4
+ * offset depends on the operator's prefix length), 100::/64 discard,
+ * fc00::/7 unique-local, fe80::/10 link-local, fec0::/10 site-local and
+ * ff00::/8 multicast.
  */
 function isBlockedIpv6(ip: string): boolean {
   const bytes = parseIpv6(ip);
   if (!bytes) return true; // unparseable: fail closed rather than guess
-  // ::/96 covers ::, ::1 and the deprecated IPv4-compatible form; ::ffff:0:0/96
-  // is IPv4-mapped. Both put the real destination in the last four bytes.
-  if (zeroPrefix(bytes, 10) && ((bytes[10] === 0 && bytes[11] === 0) || (bytes[10] === 0xff && bytes[11] === 0xff))) {
+  if (IPV4_EMBEDDING_IPV6.some((p) => hasPrefix(bytes, p.bytes, p.bits))) {
     return isBlockedIpv4Octets(bytes.slice(12));
   }
-  // NAT64 well-known prefix 64:ff9b::/96.
-  if (bytes[0] === 0x00 && bytes[1] === 0x64 && bytes[2] === 0xff && bytes[3] === 0x9b && zeroPrefix(bytes.slice(4), 8)) {
-    return isBlockedIpv4Octets(bytes.slice(12));
-  }
-  // 6to4 (2002::/16) embeds the IPv4 endpoint in bytes 2..5.
-  if (bytes[0] === 0x20 && bytes[1] === 0x02) return isBlockedIpv4Octets(bytes.slice(2, 6));
-  if (bytes[0] === 0xfe && ((bytes[1] ?? 0) & 0xc0) === 0x80) return true; // link-local fe80::/10
-  if (((bytes[0] ?? 0) & 0xfe) === 0xfc) return true; // unique-local fc00::/7
-  if (bytes[0] === 0xff) return true; // multicast
-  return false;
-}
-
-/** True if an already-resolved IP address is not safe to reach from a server. */
-export function isBlockedAddress(ip: string): boolean {
-  return ip.includes(":") ? isBlockedIpv6(ip) : isBlockedIpv4(ip);
+  if (hasPrefix(bytes, SIX_TO_FOUR.bytes, SIX_TO_FOUR.bits)) return isBlockedIpv4Octets(bytes.slice(2, 6));
+  if (!hasPrefix(bytes, GLOBAL_UNICAST.bytes, GLOBAL_UNICAST.bits)) return true;
+  return NON_GLOBAL_IPV6.some((p) => hasPrefix(bytes, p.bytes, p.bits));
 }
 
 /**
- * Resolve `host` and throw if any resolved address is not publicly routable.
- * A hostname that resolves to a private address (DNS rebinding) is caught here
- * because we check the resolved IPs, not the name.
+ * True if an already-resolved IP address is not safe to reach from a server.
+ * Anything that is not a canonical IPv4 or a parseable IPv6 address is treated
+ * as blocked.
+ */
+export function isBlockedAddress(ip: string): boolean {
+  if (ip.includes(":")) return isBlockedIpv6(ip);
+  const octets = parseIpv4(ip);
+  return octets ? isBlockedIpv4Octets(octets) : true;
+}
+
+/**
+ * True for a host that a WHATWG URL parser, and inet_aton(3) as used by glibc
+ * and musl getaddrinfo, would read as an IPv4 number: its last label is
+ * decimal, octal or hex digits (`127.1`, `0177.0.0.1`, `0x7f000001`,
+ * `2130706433`). No real top-level domain is numeric, so nothing legitimate is
+ * lost by refusing these.
+ */
+function looksNumeric(host: string): boolean {
+  const labels = host.split(".");
+  if (labels.length > 1 && labels.at(-1) === "") labels.pop();
+  return /^(?:\d+|0x[0-9a-f]*)$/i.test(labels.at(-1) ?? "");
+}
+
+function describeLookupError(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  if (code) return code;
+  return err instanceof Error && err.message ? err.message : "lookup failed";
+}
+
+/**
+ * Resolve `host` and return every address it resolves to, after checking each
+ * one. Throws if any address is not publicly routable (unless `allowPrivate`),
+ * if the name does not resolve, or if the host is a non-canonical numeric form.
+ *
+ * Callers that open a connection should connect to one of the returned
+ * addresses (passing the name separately, e.g. as TLS `servername`) rather than
+ * the name itself: resolving again at connect time would let a DNS-rebinding
+ * name answer with a public address here and a private one there.
+ */
+export async function resolveAllowedAddress(host: string, allowPrivate = false): Promise<ResolvedAddress[]> {
+  const bare = host.replace(/^\[(.*)\]$/, "$1"); // strip IPv6 brackets
+  if (bare.length === 0) throw new Error("Refusing to scan an empty host");
+
+  const family = isIP(bare);
+  if (family === 4 || family === 6) {
+    if (!allowPrivate && isBlockedAddress(bare)) throw new Error(`Refusing to scan non-public address: ${host}`);
+    return [{ address: bare, family }];
+  }
+  if (bare.includes(":")) throw new Error(`Refusing to scan ${host}: not a valid IPv6 address`);
+  if (looksNumeric(bare)) {
+    throw new Error(
+      `Refusing to scan ${host}: numeric IPv4 hosts must be written as a canonical dotted quad (for example 192.0.2.1).`,
+    );
+  }
+
+  let answers: { address: string; family: number }[];
+  try {
+    answers = await lookup(bare, { all: true });
+  } catch (err) {
+    throw new Error(`Refusing to scan ${host}: DNS resolution failed (${describeLookupError(err)})`, {
+      cause: err,
+    });
+  }
+  if (answers.length === 0) throw new Error(`Refusing to scan ${host}: DNS returned no addresses`);
+
+  const addresses = answers.map((a): ResolvedAddress => ({ address: a.address, family: a.family === 6 ? 6 : 4 }));
+  if (!allowPrivate) {
+    const blocked = addresses.find((a) => isBlockedAddress(a.address));
+    if (blocked) {
+      throw new Error(
+        `Refusing to scan ${host}: resolves to non-public address ${blocked.address}. Pass --allow-private to override.`,
+      );
+    }
+  }
+  return addresses;
+}
+
+/**
+ * Throw unless `host` resolves only to publicly routable addresses. A thin
+ * wrapper over {@link resolveAllowedAddress} for callers that only need the
+ * verdict; with `allowPrivate` it checks nothing, as before.
  */
 export async function assertTargetAllowed(host: string, allowPrivate = false): Promise<void> {
   if (allowPrivate) return;
-  const bare = host.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
-  if (parseIpv4(bare) || bare.includes(":")) {
-    if (isBlockedAddress(bare)) throw new Error(`Refusing to scan non-public address: ${host}`);
-    return;
-  }
-  let addresses: { address: string }[];
-  try {
-    addresses = await lookup(bare, { all: true });
-  } catch {
-    return; // DNS failure surfaces later as a connect error with a clearer message
-  }
-  const blocked = addresses.find((a) => isBlockedAddress(a.address));
-  if (blocked) {
-    throw new Error(
-      `Refusing to scan ${host}: resolves to non-public address ${blocked.address}. Pass --allow-private to override.`,
-    );
-  }
+  await resolveAllowedAddress(host, false);
 }
