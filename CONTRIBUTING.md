@@ -25,12 +25,6 @@ pnpm test        # vitest, offline (no network in unit tests)
 pnpm build       # tsup
 ```
 
-The Cloudflare Worker in `web/` has its own package and its own gates:
-
-```bash
-cd web && pnpm install && pnpm typecheck && pnpm test
-```
-
 ## Where things live
 
 - `src/asn1.ts`, `src/crypto.ts`: the parsing and classification core. Changes here
@@ -70,6 +64,6 @@ Every entry must:
 
 ## Reporting a security issue
 
-The scanner ingests untrusted input (arbitrary hosts, repositories, and public
-POSTs). If you find a way to make it reach an internal address, execute code, or
+The scanner ingests untrusted input (arbitrary hosts, repositories, and, through
+the MCP server, tool arguments written by a model). If you find a way to make it reach an internal address, execute code, or
 exhaust resources, please open a private report rather than a public issue.

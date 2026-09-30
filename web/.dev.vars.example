@@ -1,3 +1,0 @@
-# Copy to .dev.vars and fill in a long random string before running `wrangler dev`.
-# Used to HMAC client IPs before they hit D1 — never commit the real value.
-IP_HASH_SECRET="replace-me-with-32-bytes-of-randomness"
