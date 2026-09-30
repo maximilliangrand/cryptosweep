@@ -190,10 +190,22 @@ function curveOf(name: string | undefined): { name: string; oid: string; bits: n
   return name ? CURVES[name.toLowerCase()] : undefined;
 }
 
+/** RSA / RSA-PSS / DSA keys: the size is the parameter set and sets the SP 800-57 strength. */
+function integerKey(oid: string): (match: RegExpExecArray) => AlgorithmDescriptor {
+  return (m) => ({
+    primitive: "signature",
+    nistQuantumSecurityLevel: 0,
+    oid,
+    parameterSetIdentifier: m[1],
+    classicalSecurityLevel: m[1] ? FFC_IFC_STRENGTH[m[1]] : undefined,
+  });
+}
+
 /**
  * Canonical-label rules, first match wins. Each row reads the label's own
  * parameters (key size, curve, parameter set), so a level is only stated when
- * the label determines it.
+ * the label determines it. `RSA-?` / `DSA-?` are the scanners' labels for a
+ * key whose size could not be read.
  */
 const ALGORITHM_RULES: readonly Rule[] = [
   [/^jwt-(.+)$/i, (m) => JOSE[m[1] ?? ""] ?? { primitive: "unknown" }],
@@ -224,13 +236,16 @@ const ALGORITHM_RULES: readonly Rule[] = [
     }),
   ],
   [
-    /^slh-dsa(?:-((?:sha2|shake)-(128|192|256)[sf]))?$/i,
-    (m, label) => ({
-      primitive: "signature",
-      nistQuantumSecurityLevel: m[2] ? SLH_DSA_LEVEL[m[2]] : undefined,
-      oid: Object.entries(PQ_SIGNATURE_OIDS).find(([name]) => name.toLowerCase() === label.toLowerCase())?.[1],
-      parameterSetIdentifier: m[1] ? `${(m[1].split("-")[0] ?? "").toUpperCase()}-${m[1].split("-")[1] ?? ""}` : undefined,
-    }),
+    /^slh-dsa(?:-(sha2|shake)-(128|192|256)([sf]))?$/i,
+    (m) => {
+      const set = m[1] && m[2] && m[3] ? `${m[1].toUpperCase()}-${m[2]}${m[3].toLowerCase()}` : undefined;
+      return {
+        primitive: "signature",
+        nistQuantumSecurityLevel: m[2] ? SLH_DSA_LEVEL[m[2]] : undefined,
+        oid: set ? PQ_SIGNATURE_OIDS[`SLH-DSA-${set}`] : undefined,
+        parameterSetIdentifier: set,
+      };
+    },
   ],
   // Signature-algorithm names read from a certificate's ASN.1.
   [
@@ -240,37 +255,10 @@ const ALGORITHM_RULES: readonly Rule[] = [
       return { primitive: "signature", nistQuantumSecurityLevel: 0, oid };
     },
   ],
-  [
-    /^rsa-pss(?:-(\d+))?$/i,
-    (m) => ({
-      primitive: "signature",
-      nistQuantumSecurityLevel: 0,
-      oid: OID.rsassaPss,
-      parameterSetIdentifier: m[1],
-      classicalSecurityLevel: m[1] ? FFC_IFC_STRENGTH[m[1]] : undefined,
-    }),
-  ],
+  [/^rsa-pss(?:-(\d+)|-\?)?$/i, integerKey(OID.rsassaPss)],
   [/^rsa-?oaep|^rsaes-oaep/i, () => ({ primitive: "pke", nistQuantumSecurityLevel: 0, oid: OID.rsaesOaep })],
-  [
-    /^rsa(?:-(\d+))?$/i,
-    (m) => ({
-      primitive: "signature",
-      nistQuantumSecurityLevel: 0,
-      oid: OID.rsaEncryption,
-      parameterSetIdentifier: m[1],
-      classicalSecurityLevel: m[1] ? FFC_IFC_STRENGTH[m[1]] : undefined,
-    }),
-  ],
-  [
-    /^dsa(?:-(\d+))?$/i,
-    (m) => ({
-      primitive: "signature",
-      nistQuantumSecurityLevel: 0,
-      oid: OID.dsa,
-      parameterSetIdentifier: m[1],
-      classicalSecurityLevel: m[1] ? FFC_IFC_STRENGTH[m[1]] : undefined,
-    }),
-  ],
+  [/^rsa(?:-(\d+)|-\?)?$/i, integerKey(OID.rsaEncryption)],
+  [/^dsa(?:-(\d+)|-\?)?$/i, integerKey(OID.dsa)],
   [
     /^(ecdsa|ecdhe?)(?:-(.+))?$/i,
     (m) => {
@@ -352,7 +340,7 @@ export function describeAlgorithm(label: string, usage: readonly CryptoUsage[] =
     if (!match) continue;
     const descriptor = describe(match, label);
     const encryptionOnly = usage.includes("encryption") && !usage.includes("signature") && !usage.includes("authentication");
-    if (encryptionOnly && descriptor.primitive === "signature" && /^rsa(?:-\d+)?$/i.test(label)) {
+    if (encryptionOnly && descriptor.primitive === "signature" && /^rsa(?:-\d+|-\?)?$/i.test(label)) {
       return compact({ ...descriptor, primitive: "pke" });
     }
     return compact(descriptor);
@@ -618,11 +606,15 @@ function addCertificate(bom: BomBuilder, cert: CertificateDetails, finding: Find
  * leaf is inventoried with the links it can honestly carry and nothing more.
  */
 function addLeafFromFindings(bom: BomBuilder, findings: readonly Finding[]): void {
+  const parsed = new Set(
+    findings.flatMap((f) => (f.certificates?.length && f.location?.host ? [endpointOf(f.location.host, f.location.port)] : [])),
+  );
   const byEndpoint = new Map<string, { signature?: Finding; key?: Finding }>();
   for (const f of findings) {
-    if (f.certificates?.length || !f.algorithm || !f.location?.host) continue;
+    if (!f.algorithm || !f.location?.host) continue;
     if (f.ruleId !== "tls/leaf-signature" && f.ruleId !== "tls/leaf-public-key") continue;
     const endpoint = endpointOf(f.location.host, f.location.port);
+    if (parsed.has(endpoint)) continue; // the parsed certificate already carries these links
     const entry = byEndpoint.get(endpoint) ?? {};
     if (f.ruleId === "tls/leaf-signature") entry.signature = f;
     else entry.key = f;

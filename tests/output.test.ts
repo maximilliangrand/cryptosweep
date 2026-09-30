@@ -174,8 +174,23 @@ function leafFindings(fixture: string): Finding[] {
   });
 }
 
+type CbomComponent = {
+  type: string;
+  "bom-ref": string;
+  name: string;
+  version?: string;
+  purl?: string;
+  cryptoProperties?: {
+    assetType: string;
+    oid?: string;
+    algorithmProperties?: { primitive?: string };
+    certificateProperties?: Record<string, string>;
+    relatedCryptoMaterialProperties?: { type?: string; algorithmRef?: string; size?: number };
+  };
+};
+
 type CbomDoc = {
-  components: Array<{ type: string; "bom-ref": string; name: string; version?: string; purl?: string; cryptoProperties?: Record<string, any> }>;
+  components: CbomComponent[];
   dependencies?: Array<{ ref: string; dependsOn?: string[]; provides?: string[] }>;
 };
 
@@ -207,12 +222,12 @@ describe("toCbom from real scanner output", () => {
   it("links the leaf certificate to its signature algorithm and public key", () => {
     const doc = JSON.parse(toCbom(buildReport("example.com", leafFindings("ec-p256.pem"), AT))) as CbomDoc;
     const certificate = doc.components.find((c) => c.cryptoProperties?.assetType === "certificate");
-    const props = certificate?.cryptoProperties?.certificateProperties as Record<string, string>;
+    const props = certificate?.cryptoProperties?.certificateProperties ?? {};
     const byRef = new Map(doc.components.map((c) => [c["bom-ref"], c]));
     expect(byRef.get(props.signatureAlgorithmRef ?? "")?.name).toBe("ecdsaWithSHA256");
     const publicKey = byRef.get(props.subjectPublicKeyRef ?? "");
     expect(publicKey?.cryptoProperties?.relatedCryptoMaterialProperties?.type).toBe("public-key");
-    expect(byRef.get(publicKey?.cryptoProperties?.relatedCryptoMaterialProperties?.algorithmRef)?.name).toBe("ECDSA-P-256");
+    expect(byRef.get(publicKey?.cryptoProperties?.relatedCryptoMaterialProperties?.algorithmRef ?? "")?.name).toBe("ECDSA-P-256");
   });
 
   it("includes parsed certificate details (subject, issuer, validity) when the finding carries them", () => {
@@ -251,8 +266,29 @@ describe("toCbom from real scanner output", () => {
       notValidAfter: leaf.validTo,
       certificateFormat: "X.509",
     });
-    const key = doc.components.find((c) => c["bom-ref"] === certificate?.cryptoProperties?.certificateProperties.subjectPublicKeyRef);
+    const key = doc.components.find((c) => c["bom-ref"] === certificate?.cryptoProperties?.certificateProperties?.subjectPublicKeyRef);
     expect(key?.cryptoProperties?.relatedCryptoMaterialProperties?.size).toBe(2048);
+  });
+
+  it("does not add a second, detail-less leaf when a finding for the endpoint carries the parsed certificate", () => {
+    const [keyFinding, signatureFinding] = leafFindings("rsa2048.pem");
+    if (!keyFinding || !signatureFinding) throw new Error("fixture findings missing");
+    const withDetails: Finding = {
+      ...signatureFinding,
+      certificates: [
+        {
+          subject: "leaf.example",
+          issuer: "ca.example",
+          notValidBefore: "2026-01-01T00:00:00.000Z",
+          notValidAfter: "2027-01-01T00:00:00.000Z",
+          signatureAlgorithm: signatureFinding.algorithm ?? "unknown",
+          publicKey: keyFinding.algorithm ?? "unknown-key",
+        },
+      ],
+    };
+    const doc = JSON.parse(toCbom(buildReport("example.com", [keyFinding, withDetails], AT))) as CbomDoc;
+    const certificates = doc.components.filter((c) => c.cryptoProperties?.assetType === "certificate");
+    expect(certificates.map((c) => c.name)).toEqual(["leaf.example"]);
   });
 
   it("inventories flagged dependencies as library components that provide their algorithms", () => {
@@ -605,5 +641,13 @@ describe("empty results", () => {
     expect(markdown).toMatch(/Coverage was partial/);
     expect(markdown).toContain("- source: 412 files (partial: 2 files over 2 MB skipped)");
     expect(markdown).toContain("- deps: 3 manifests (complete)");
+  });
+});
+
+describe("describeAlgorithm with an unreadable key size", () => {
+  it("still types RSA-? and DSA-? keys, without a size", () => {
+    expect(describeAlgorithm("RSA-?")).toEqual({ primitive: "signature", nistQuantumSecurityLevel: 0, oid: "1.2.840.113549.1.1.1" });
+    expect(describeAlgorithm("DSA-?").primitive).toBe("signature");
+    expect(describeAlgorithm("RSA-PSS-?").oid).toBe("1.2.840.113549.1.1.10");
   });
 });
