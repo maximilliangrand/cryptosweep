@@ -10,8 +10,13 @@
  * effects, so tests and embedders import that module instead.
  */
 import { serve } from "./mcp-server";
+import { abortOnSignals } from "./shutdown";
 
-serve(process.stdin, process.stdout).then(
+// SIGINT/SIGTERM cancel every call in flight (and remove partial clones) before exiting.
+const shutdown = new AbortController();
+abortOnSignals(shutdown);
+
+serve(process.stdin, process.stdout, { signal: shutdown.signal }).then(
   () => process.exit(0),
   (err: unknown) => {
     process.stderr.write(`cryptosweep-mcp: ${err instanceof Error ? err.message : String(err)}\n`);

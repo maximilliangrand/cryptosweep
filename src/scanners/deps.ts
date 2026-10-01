@@ -50,6 +50,8 @@ export interface DepsScanOptions {
   maxTotalBytes?: number;
   /** Opt-in OSV.dev advisory enrichment (network). Off unless enabled. */
   advisories?: AdvisoryOptions;
+  /** Aborting stops the walk before the next entry or manifest and rejects the scan. */
+  signal?: AbortSignal;
 }
 
 const DEFAULT_MAX_FILE_BYTES = 5_000_000;
@@ -339,6 +341,7 @@ function describeSample(sample: PathSample): string {
 
 interface DepsWalk {
   readonly rootDir: string;
+  readonly signal?: AbortSignal;
   readonly ignoreDirs: ReadonlySet<string>;
   readonly maxFileBytes: number;
   readonly hits: ManifestHit[];
@@ -382,6 +385,7 @@ async function findManifests(dir: string, walk: DepsWalk): Promise<void> {
   if (dir !== walk.rootDir && entries.some((entry) => entry.isFile() && SKIP_MARKERS.has(entry.name))) return;
   const parentDir = dir === walk.rootDir ? "" : (dir.split(sep).pop() ?? "");
   for (const entry of entries) {
+    walk.signal?.throwIfAborted();
     if (entry.isSymbolicLink()) continue;
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
@@ -525,6 +529,7 @@ function coverageFindings(walk: DepsWalk): Finding[] {
 export async function scanDeps(rootDir: string, options: DepsScanOptions = {}): Promise<Finding[]> {
   const walk: DepsWalk = {
     rootDir,
+    ...(options.signal ? { signal: options.signal } : {}),
     ignoreDirs: new Set([...DEFAULT_IGNORE_DIRS, ...(options.ignoreDirs ?? [])]),
     maxFileBytes: options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES,
     hits: [],
@@ -537,10 +542,12 @@ export async function scanDeps(rootDir: string, options: DepsScanOptions = {}): 
   await findManifests(rootDir, walk);
   const allDeps: ParsedDep[] = [];
   for (const hit of walk.hits) {
+    options.signal?.throwIfAborted();
     const content = await readManifest(hit, walk);
     if (content !== null) allDeps.push(...parseManifest(hit, content));
   }
   const matched = matchDeps(allDeps);
+  options.signal?.throwIfAborted();
   const findings = options.advisories?.enabled ? await annotateWithAdvisories(matched, allDeps, options.advisories) : matched;
   return [...findings, ...coverageFindings(walk)];
 }

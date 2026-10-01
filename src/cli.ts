@@ -28,6 +28,7 @@ import {
   scanTarget,
 } from "./orchestrate";
 import type { ScanTargetOptions, Target } from "./orchestrate";
+import { abortOnSignals, signalExitCode } from "./shutdown";
 import { VERSION } from "./version";
 
 interface ScanOptions {
@@ -140,8 +141,16 @@ async function writeOutputs(plan: ScanPlan, report: Report, risk: RiskModel): Pr
 }
 
 async function runScan(target: string, options: ScanOptions): Promise<void> {
+  // Ctrl-C aborts the scan (killing git and removing a partial clone) instead of
+  // killing the process and leaving the clone's temp directory behind.
+  const interrupt = new AbortController();
+  let interruptedBy: NodeJS.Signals | undefined;
+  const release = abortOnSignals(interrupt, (signal) => {
+    interruptedBy = signal;
+  });
   try {
     const plan = planScan(target, options);
+    plan.scan.signal = interrupt.signal;
 
     // The disclosure comes before the scan, because the scan is what sends the data.
     if (plan.scan.advisories) {
@@ -178,7 +187,9 @@ async function runScan(target: string, options: ScanOptions): Promise<void> {
     }
   } catch (err) {
     stderr(`cryptosweep: ${describeError(err)}\n`);
-    process.exitCode = 1;
+    process.exitCode = interruptedBy ? signalExitCode(interruptedBy) : 1;
+  } finally {
+    release();
   }
 }
 

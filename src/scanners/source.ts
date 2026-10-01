@@ -47,6 +47,8 @@ export interface SourceScanOptions {
   maxFiles?: number;
   /** Maximum total bytes to read before stopping, binary sniffs included. */
   maxTotalBytes?: number;
+  /** Aborting stops the walk before the next directory entry and rejects the scan. */
+  signal?: AbortSignal;
 }
 
 const DEFAULT_MAX_FILES = 25_000;
@@ -649,6 +651,7 @@ export function scanContent(relPath: string, content: string, ids = new IdAlloca
 
 interface WalkState {
   readonly rootDir: string;
+  readonly signal?: AbortSignal;
   readonly ignoreDirs: ReadonlySet<string>;
   readonly maxFileBytes: number;
   readonly ids: IdAllocator;
@@ -788,6 +791,7 @@ async function walk(dir: string, state: WalkState): Promise<void> {
   }
   if (listing.truncated) state.truncated = true;
   for (const entry of listing.entries) {
+    state.signal?.throwIfAborted();
     if (state.truncated || state.files <= 0 || state.bytes <= 0) {
       state.truncated = true;
       return;
@@ -858,6 +862,7 @@ export async function scanSource(rootDir: string, options: SourceScanOptions = {
   const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
   const state: WalkState = {
     rootDir,
+    ...(options.signal ? { signal: options.signal } : {}),
     ignoreDirs: new Set([...DEFAULT_IGNORE_DIRS, ...(options.ignoreDirs ?? [])]),
     maxFileBytes: options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES,
     ids: new IdAllocator(),

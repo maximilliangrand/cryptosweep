@@ -366,6 +366,11 @@ export interface ServeOptions {
   maxQueued?: number;
   /** Message handler; defaults to {@link dispatch}. Injected in tests. */
   handle?: (message: JsonRpcMessage, signal: AbortSignal) => Promise<JsonRpcResponse | null>;
+  /**
+   * Shutdown: aborting it stops reading, drops queued calls and aborts the
+   * running ones (killing their clones), then the returned promise resolves.
+   */
+  signal?: AbortSignal;
 }
 
 interface Job {
@@ -387,9 +392,11 @@ function requestKey(id: unknown): string | null {
  * or clones. Every other method is answered immediately, so ping and
  * cancellation stay responsive during a long scan. `notifications/cancelled`
  * drops a queued call, or aborts a running one (killing an in-flight clone),
- * and in both cases suppresses the response, as the protocol requires. When
- * the input closes, the server stops reading but finishes and flushes every
- * accepted request before the returned promise resolves.
+ * and in both cases suppresses the response, as the protocol requires. A
+ * running call is aborted all the way down: its clone, directory walks and
+ * TLS connections stop. When the input closes, the server stops reading but
+ * finishes and flushes every accepted request before the returned promise
+ * resolves; aborting `options.signal` instead cancels everything in flight.
  */
 export function serve(
   input: Readable,
@@ -503,6 +510,13 @@ export function serve(
   };
 
   const lines = createInterface({ input, crlfDelay: Infinity });
+  const shutdown = (): void => {
+    queue.length = 0;
+    for (const job of running.values()) job.controller.abort();
+    lines.close();
+  };
+  if (options.signal?.aborted) shutdown();
+  else options.signal?.addEventListener("abort", shutdown, { once: true });
   lines.on("line", (line) => {
     const trimmed = line.trim();
     if (!trimmed) return;

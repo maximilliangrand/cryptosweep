@@ -18,6 +18,7 @@
  * and the checkout, and the temp directory is removed on every failure path.
  */
 import { spawn } from "node:child_process";
+import { rmSync } from "node:fs";
 import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isIP } from "node:net";
@@ -67,6 +68,19 @@ const WATCH_INTERVAL_MS = 250;
 /** How long git gets to clean up after SIGTERM before it is killed outright. */
 const KILL_GRACE_MS = 2_000;
 const MAX_STDERR_BYTES = 16 * 1024;
+
+/** Temp directories of clones not yet cleaned up, so a forced exit can still remove them. */
+const activeWorkDirs = new Set<string>();
+
+/**
+ * Remove every clone temp directory still on disk, synchronously. For an
+ * executable exiting on a second interrupt, when the normal (asynchronous)
+ * cleanup of an aborted clone may not have run; a no-op otherwise.
+ */
+export function removeActiveClonesSync(): void {
+  for (const dir of activeWorkDirs) rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  activeWorkDirs.clear();
+}
 
 /** GitHub account and organization names: alphanumerics and inner hyphens, at most 39 characters. */
 const GITHUB_OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
@@ -418,8 +432,12 @@ export async function cloneRepository(
   options.signal?.throwIfAborted();
 
   const work = await mkdtemp(join(tmpdir(), "cryptosweep-"));
+  activeWorkDirs.add(work);
   const dir = join(work, "repo");
-  const cleanup = (): Promise<void> => rm(work, { recursive: true, force: true, maxRetries: 3 });
+  const cleanup = async (): Promise<void> => {
+    await rm(work, { recursive: true, force: true, maxRetries: 3 });
+    activeWorkDirs.delete(work);
+  };
   const config = hardenedConfig(remote, pinned);
   const run = {
     env: gitEnvironment(remote, work, pinned),

@@ -29,7 +29,7 @@ export interface ScanTargetOptions {
   advisories?: boolean;
   /** Permit clones from remotes other than https://github.com. CLI opt-in; never set by the MCP server. */
   allowAnyGitHost?: boolean;
-  /** Aborts an in-flight clone and stops the scan before its next phase. */
+  /** Aborts the scan in progress: a clone, the directory walks, or the TLS connections. */
   signal?: AbortSignal;
 }
 
@@ -188,11 +188,12 @@ export function isFilesystemLike(input: string): boolean {
   return input.includes("/") && parseGitHubRepo(input) === null;
 }
 
-/** Scan a local directory: source + dependency manifests, then reconcile the two. */
-export async function scanLocalDir(dir: string, advisories = false): Promise<Finding[]> {
+/** Scan a local directory: source + dependency manifests, then reconcile the two. `signal` stops both walks. */
+export async function scanLocalDir(dir: string, advisories = false, signal?: AbortSignal): Promise<Finding[]> {
+  const cancel = signal ? { signal } : {};
   const [source, deps] = await Promise.all([
-    scanSource(dir),
-    scanDeps(dir, advisories ? { advisories: { enabled: true } } : {}),
+    scanSource(dir, cancel),
+    scanDeps(dir, advisories ? { advisories: { enabled: true }, ...cancel } : cancel),
   ]);
   return reconcile([...source, ...deps]);
 }
@@ -206,7 +207,7 @@ export async function scanClonedRepo(url: string, options: ScanTargetOptions = {
   });
   try {
     options.signal?.throwIfAborted();
-    return await scanLocalDir(repo.dir, options.advisories);
+    return await scanLocalDir(repo.dir, options.advisories, options.signal);
   } finally {
     await repo.cleanup();
   }
@@ -222,10 +223,11 @@ export async function scanTarget(target: string | Target, options: ScanTargetOpt
         port: options.port ?? parsed.port,
         timeoutMs: options.timeoutMs ?? 10_000,
         allowPrivate: options.allowPrivate,
+        ...(options.signal ? { signal: options.signal } : {}),
       });
     case "path":
       if (statKind(parsed.dir) !== "dir") throw new Error(`No such directory: ${parsed.dir}`);
-      return scanLocalDir(parsed.dir, options.advisories);
+      return scanLocalDir(parsed.dir, options.advisories, options.signal);
     case "github":
     case "remote":
       return scanClonedRepo(parsed.url, options);

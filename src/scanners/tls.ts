@@ -125,6 +125,8 @@ export interface TlsScanOptions {
   probe?: TlsProbe;
   /** Allow scanning non-public addresses (localhost, RFC 1918). Off by default. */
   allowPrivate?: boolean;
+  /** Aborting destroys every open connection and rejects the scan. */
+  signal?: AbortSignal;
 }
 
 /** A post-quantum TLS 1.3 key-exchange group and the ML-KEM parameter set inside it. */
@@ -1147,6 +1149,8 @@ interface ResolvedTarget {
   /** SNI and certificate-identity name; absent for an IP literal, which SNI forbids. */
   servername?: string;
   addresses: LookupAddress[];
+  /** Aborts every connection made to this target. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -1155,10 +1159,12 @@ interface ResolvedTarget {
  * the whole name if any one address is blocked (the kernel may connect to any
  * of them). Every connection then goes to one of these addresses.
  */
-async function resolveTarget(host: string, allowPrivate: boolean): Promise<ResolvedTarget> {
+async function resolveTarget(host: string, allowPrivate: boolean, signal?: AbortSignal): Promise<ResolvedTarget> {
   const bare = host.replace(/^\[(.*)\]$/, "$1"); // strip IPv6 brackets
   const addresses = await resolveAllowedAddress(bare, allowPrivate);
-  return isIP(bare) === 0 ? { host: bare, servername: bare, addresses } : { host: bare, addresses };
+  signal?.throwIfAborted();
+  const base = { host: bare, addresses, ...(signal ? { signal } : {}) };
+  return isIP(bare) === 0 ? { ...base, servername: bare } : base;
 }
 
 /**
@@ -1217,20 +1223,39 @@ function isTlsLayerError(err: unknown): boolean {
   return errorCode(err)?.startsWith("ERR_SSL_") ?? false;
 }
 
-/** Open a TLS connection and resolve once the handshake completes; the caller ends the socket. */
-function openTls(options: ConnectionOptions, timeoutMs: number): Promise<TLSSocket> {
+/** The error an aborted signal carries, as an Error. */
+function abortError(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason;
+  return reason instanceof Error ? reason : new Error("The TLS scan was cancelled");
+}
+
+/**
+ * Open a TLS connection and resolve once the handshake completes; the caller
+ * ends the socket. Aborting `signal` before then destroys the socket.
+ */
+function openTls(options: ConnectionOptions, timeoutMs: number, signal?: AbortSignal): Promise<TLSSocket> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError(signal));
+      return;
+    }
     let socket: TLSSocket;
+    const onAbort = (): void => {
+      if (signal) socket.destroy(abortError(signal));
+    };
     try {
       socket = tlsConnect(options, () => {
         socket.setTimeout(0);
+        signal?.removeEventListener("abort", onAbort);
         resolve(socket);
       });
     } catch (err) {
       reject(err instanceof Error ? err : new Error(String(err)));
       return;
     }
+    signal?.addEventListener("abort", onAbort, { once: true });
     socket.on("error", (err) => {
+      signal?.removeEventListener("abort", onAbort);
       socket.destroy();
       reject(err);
     });
@@ -1265,7 +1290,7 @@ async function readHandshake(
   offer: ConnectionOptions,
 ): Promise<HandshakeResult> {
   const options = { ...connectOptions(target, port), ALPNProtocols: ["h2", "http/1.1"], ...offer };
-  const socket = await openTls(options, timeoutMs);
+  const socket = await openTls(options, timeoutMs, target.signal);
   try {
     const ephemeral = ephemeralKey(socket);
     return {
@@ -1317,7 +1342,7 @@ async function probeGroup(
   }
   let socket: TLSSocket;
   try {
-    socket = await openTls({ ...connectOptions(target, port), minVersion: "TLSv1.3", ecdhCurve: group }, timeoutMs);
+    socket = await openTls({ ...connectOptions(target, port), minVersion: "TLSv1.3", ecdhCurve: group }, timeoutMs, target.signal);
   } catch (err) {
     const code = errorCode(err) ?? (err instanceof Error ? err.message : String(err));
     // The primary handshake shows the host speaks TLS, so a TLS-layer failure
@@ -1357,6 +1382,8 @@ function networkProbe(target: ResolvedTarget): TlsProbe {
       handshake(target, port, timeoutMs),
       Promise.all(PQ_GROUPS.map((g) => probeGroup(target, port, probeTimeout, g.name))),
     ]);
+    // A probe reads an aborted connection as inconclusive; the scan itself must not complete.
+    target.signal?.throwIfAborted();
     return { ...base, hybridKex: summarizeProbes(groupProbes), groupProbes };
   };
 }
@@ -1366,7 +1393,8 @@ export async function scanTls(host: string, options: TlsScanOptions = {}): Promi
   const port = options.port ?? 443;
   const timeoutMs = options.timeoutMs ?? 10_000;
   // Only the real network path resolves and vets; an injected probe is trusted (and offline).
-  const probe = options.probe ?? networkProbe(await resolveTarget(host, options.allowPrivate ?? false));
+  const probe = options.probe ?? networkProbe(await resolveTarget(host, options.allowPrivate ?? false, options.signal));
   const result = await probe(host, port, timeoutMs);
+  options.signal?.throwIfAborted();
   return analyzeTls(result, `${host}:${port}`, new Date(), { host, port });
 }
