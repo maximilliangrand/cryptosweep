@@ -23,6 +23,7 @@
  * or decrypt) is assessed under both quantum threat models and gets the more
  * urgent verdict, and its rationale says so.
  */
+import { algorithmUsage } from "../algorithms";
 import { cnsa2Standing } from "../crypto";
 import type { CryptoUsage, Finding, PqStatus, Severity } from "../report";
 import { normalizeFinding } from "../report";
@@ -166,23 +167,6 @@ const USAGE_BY_RULE_FAMILY: readonly UsageRow[] = [
 ];
 
 /**
- * Usage implied by a canonical algorithm label, first match wins. Labels are
- * the normalized `Finding.algorithm` vocabulary (`RSA-2048`, `ECDSA-P-256`,
- * `sha256WithRSAEncryption`, `JWT-RS256`, `X25519MLKEM768`, ...).
- */
-const USAGE_BY_ALGORITHM: readonly UsageRow[] = [
-  [/ml-?kem|kyber|^ffdhe|^(?:x25519|x448|ecdhe?|dhe?)(?:$|[-_])/i, ["key-establishment"]],
-  [/oaep|^rsaes|^ecies|^elgamal/i, ["encryption"]],
-  [/^jwt-/i, ["authentication"]],
-  [/with|^rsassa|^rsa-pss|^(?:ml|slh)-dsa|^ecdsa|^dsa|^ed(?:25519|448)|^eddsa/i, ["signature"]],
-  // No row for a bare RSA key (`RSA-2048`): it can sign or decrypt, so its
-  // usage is undetermined unless the rule or the scanner says which.
-  [/^(?:md[245]|sha|blake|ripemd)/i, ["hashing"]],
-  [/^hmac|^hs\d/i, ["authentication"]],
-  [/aes|des|rc[24]|chacha|salsa|camellia|blowfish|arcfour/i, ["encryption"]],
-];
-
-/**
  * Which quantum threat each usage exposes. A quantum-vulnerable protocol
  * finding means classical key exchange was negotiated (an obsolete version is
  * caught earlier as a classical break). Hashing and key material carry no Shor
@@ -250,9 +234,7 @@ export function resolveUsage(finding: Finding): CryptoUsage[] {
     const entry = entryForRuleId(ruleId);
     if (entry) return [...entry.usage];
   }
-  const algorithm = finding.algorithm ?? "";
-  const byAlgorithm = USAGE_BY_ALGORITHM.find(([pattern]) => pattern.test(algorithm))?.[1];
-  return byAlgorithm ? [...byAlgorithm] : [];
+  return finding.algorithm ? algorithmUsage(finding.algorithm) : [];
 }
 
 /**

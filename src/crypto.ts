@@ -159,7 +159,7 @@ export function isStatefulHashBasedKey(keyType: KeyType): boolean {
 
 const CNSA2_ALGORITHM = /^(?:ml-?kem-?1024|(?:secp384r1)?mlkem1024|(?:hash)?ml-dsa-87(?:-with-sha512)?|hss-lms|lms|xmss(?:mt)?)$/i;
 const PUBLIC_KEY_ALGORITHM =
-  /^(?:rsa|rsassa-?pss|dsa|ec(?:dsa|dhe?)?|dhe?|ffdhe|x25519|x448|ed25519|ed448|eddsa|ml-?kem|ml-dsa|slh-dsa|hash(?:ml|slh)-dsa|static-rsa)(?:$|[-_/\d])|mlkem\d+$|^(?:md\d|sha\d*)with|^(?:dsa|ecdsa)with|^jwt-(?:rs|ps|es|eddsa|ed\d|ecdh)/i;
+  /^(?:rsa|rsassa-?pss|dsa|ec(?:dsa|dhe?)?|dhe?|ffdhe|x25519|x448|ed25519|ed448|eddsa|ml-?kem|ml-dsa|slh-dsa|hash(?:ml|slh)-dsa|static-rsa)(?:$|[-_/\d])|mlkem\d+$|kyber|^(?:md\d|sha\d*)with|^(?:dsa|ecdsa)with|^jwt-(?:rs|ps|es|eddsa|ed\d|ecdh)/i;
 
 /**
  * Where an algorithm label stands against CNSA 2.0: true for the algorithms

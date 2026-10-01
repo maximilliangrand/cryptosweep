@@ -119,6 +119,11 @@ export function signatureAlgorithmName(oid: string | null): string | null {
   return SIGNATURE_ALGORITHM_OIDS[oid] ?? null;
 }
 
+/** Every name {@link signatureAlgorithmName} can return: the vocabulary the CBOM and risk engine must know. */
+export function signatureAlgorithmNames(): string[] {
+  return Object.values(SIGNATURE_ALGORITHM_OIDS);
+}
+
 /**
  * Canonical X.509 signature-algorithm OIDs.
  * Sources: RFC 5758, RFC 8410 (EdDSA), RFC 4055 (RSASSA-PSS), NIST CSOR

@@ -344,11 +344,30 @@ function tlsFindings(name: string, result: Partial<TlsScanResult>, host = "examp
   return analyzeTls(scan, `${host}:443`, AT, { host, port: 443 });
 }
 
+const TLS_CERTS = fileURLToPath(new URL("./fixtures/tls-certs/", import.meta.url));
+
+/** An RSASSA-PSS leaf, served over TLS 1.2 static-RSA key transport, and a DHE-1024 server: every new primitive kind. */
+function keyTransportFindings(): Finding[] {
+  const pss = parseCertificate(new X509Certificate(readFileSync(`${TLS_CERTS}pss-sha256.pem`)).raw, true);
+  if (!pss) throw new Error("fixture pss-sha256.pem did not parse");
+  return [
+    ...analyzeTls({ protocol: "TLSv1.2", cipherName: "AES256-GCM-SHA384", groupName: null, chain: [pss] }, "pss.example:443", AT, { host: "pss.example", port: 443 }),
+    ...analyzeTls(
+      { protocol: "TLSv1.2", cipherName: "DHE-RSA-AES128-GCM-SHA256", groupName: null, groupBits: 1024, chain: [cert("rsa2048.pem")] },
+      "dhe.example:443",
+      AT,
+      { host: "dhe.example", port: 443 },
+    ),
+    ...scanContent("src/kdf.js", 'const c = require("crypto");\nc.pbkdf2Sync(p, s, 1, 32, "sha1");\nc.createHmac("md5", k);\nc.generateKeyPairSync("ec");'),
+  ];
+}
+
 /** Everything the scanners emit today, plus the structured fields they can attach. */
 function corpus(): Finding[] {
   const leaf = cert("rsa2048.pem");
   return [
     ...scanContent("src/app.ts", SOURCE),
+    ...keyTransportFindings(),
     ...scanContent("docs/My Notes #1.md", 'crypto.createHash("md5")'),
     ...scanContent("src/ünïcode dir/[x](https:evil).js", 'require("crypto").createHash("sha1")'),
     ...matchDeps([
