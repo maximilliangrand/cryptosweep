@@ -1859,7 +1859,7 @@ function javaCipher(token: string): RuleSelection | null {
 }
 
 function javaDigest(token: string): RuleSelection | null {
-  if (/^MD[25]$/i.test(token)) return { rule: "source/java/weak-hash", algorithm: "MD5", detail: token };
+  if (/^MD[25]$/i.test(token)) return { rule: "source/java/weak-hash", algorithm: token.toUpperCase(), detail: token };
   return /^SHA(?:-?1)?$/i.test(token) ? { rule: "source/java/weak-hash", algorithm: "SHA-1", detail: token } : null;
 }
 

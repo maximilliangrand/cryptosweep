@@ -22,7 +22,7 @@
  * sorted order, so finding order and ids do not depend on the filesystem.
  * Remote repositories are cloned by clone.ts, behind the SSRF guard.
  */
-import { createPublicKey } from "node:crypto";
+import { createPrivateKey, createPublicKey } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 import { constants } from "node:fs";
 import type { Dirent } from "node:fs";
@@ -30,7 +30,7 @@ import { open, opendir } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import type { Category, Confidence, Finding, NonProductionContext, Severity } from "../report";
-import { curveFriendlyName, keyAlgorithmLabel } from "../crypto";
+import { curveFriendlyName, isPostQuantumKey, keyAlgorithmLabel, toKeyType } from "../crypto";
 import type { KeyType } from "../crypto";
 import { isJsTsFile, scanJsAst } from "./source-ast";
 import type { ScanJsResult } from "./source-ast";
@@ -250,7 +250,8 @@ function publicKeyHit(index: number, label: string, body: readonly string[]): Ru
     return { index, tier: "medium", selection };
   }
   if (PQ_KEY_TYPE.test(type)) {
-    const algorithm = type.toUpperCase();
+    // The same canonical label as a certificate key: `SLH-DSA-SHA2-128s`, not `SLH-DSA-SHA2-128S`.
+    const algorithm = keyAlgorithmLabel(toKeyType(type), null, null);
     return {
       index,
       tier: "confirmed",
@@ -269,6 +270,43 @@ function publicKeyHit(index: number, label: string, body: readonly string[]): Ru
     return { index, tier: "confirmed", selection: { rule, algorithm, detail: algorithm } };
   }
   return { index, tier: "confirmed", selection: { rule, detail: type, severity: "low", pq: "unknown" } };
+}
+
+function parsePrivateKey(pem: string): KeyObject | null {
+  try {
+    return createPrivateKey(pem);
+  } catch {
+    return null;
+  }
+}
+
+/** The canonical label of a parsed key object, or undefined for a type the knowledge base does not classify. */
+function keyObjectLabel(key: KeyObject): string | undefined {
+  const keyType = toKeyType(key.asymmetricKeyType);
+  if (keyType === "unknown") return undefined;
+  const details = key.asymmetricKeyDetails ?? {};
+  return keyAlgorithmLabel(keyType, details.modulusLength ?? null, curveFriendlyName(details.namedCurve) ?? null);
+}
+
+/**
+ * A committed private key, typed when its PEM parses (unencrypted PKCS#1,
+ * SEC 1 and PKCS#8 do; encrypted, OpenSSH and PGP blocks do not). The leak is
+ * critical whatever the algorithm, but a post-quantum key is not also
+ * quantum-vulnerable, so its `pq` verdict is `safe`, as for a public key.
+ */
+function privateKeyHit(index: number, tier: Confidence, label: string, body: readonly string[]): RuleHit {
+  const rule: RuleId = "keys/private-key-block";
+  const key = parsePrivateKey(`-----BEGIN ${label}-----\n${body.join("\n")}\n-----END ${label}-----\n`);
+  const algorithm = key ? keyObjectLabel(key) : undefined;
+  if (!key || !algorithm) return { index, tier, selection: { rule } };
+  const postQuantum = isPostQuantumKey(toKeyType(key.asymmetricKeyType));
+  return {
+    index,
+    tier,
+    selection: postQuantum
+      ? { rule, algorithm, detail: algorithm, pq: "safe", note: "The key is post-quantum; the exposure is the leak, not the algorithm." }
+      : { rule, algorithm, detail: algorithm },
+  };
 }
 
 /**
@@ -309,7 +347,7 @@ function keyHits(content: string, ast: ScanJsResult | null): RuleHit[] {
     const body = readPemBody(content, index + match[0].length);
     if (!body) continue;
     if (label.includes("PRIVATE")) {
-      hits.push({ index, tier: inLiteral?.(index) ? "confirmed" : "high", selection: { rule: "keys/private-key-block" } });
+      hits.push(privateKeyHit(index, inLiteral?.(index) ? "confirmed" : "high", label, body));
     } else {
       hits.push(publicKeyHit(index, label, body));
     }

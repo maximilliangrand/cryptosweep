@@ -725,12 +725,14 @@ function evaluateProtocol(result: TlsScanResult, target: string): Finding | null
   };
 
   if (protocol === "TLSv1.3") {
+    // TLS 1.3 can carry ML-KEM but does not imply it: the key-exchange finding
+    // holds the post-quantum verdict, so the version itself is not graded.
     return {
       ...base,
       severity: "info",
       title: "Negotiated TLSv1.3",
-      pq_status: "transitional",
-      recommendation: `TLS 1.3 is required for post-quantum key exchange, keep it enabled. ${PROTOCOL_SCOPE}`,
+      pq_status: "unknown",
+      recommendation: `TLS 1.3 is required for post-quantum key exchange, keep it enabled; the key-exchange finding says whether this session used it. ${PROTOCOL_SCOPE}`,
     };
   }
   if (protocol === "TLSv1.2") {
@@ -1396,5 +1398,7 @@ export async function scanTls(host: string, options: TlsScanOptions = {}): Promi
   const probe = options.probe ?? networkProbe(await resolveTarget(host, options.allowPrivate ?? false, options.signal));
   const result = await probe(host, port, timeoutMs);
   options.signal?.throwIfAborted();
-  return analyzeTls(result, `${host}:${port}`, new Date(), { host, port });
+  // An IPv6 literal is bracketed in the evidence, so `2606:4700::1111:443` cannot be misread.
+  const authority = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return analyzeTls(result, `${authority}:${port}`, new Date(), { host, port });
 }
