@@ -28,7 +28,9 @@ describe("package invariants", () => {
     expect(plugin.provenance.sourceUrl).toBe("https://github.com/maximilliangrand/cryptosweep");
   });
 
-  it("targets Node >= 22, the oldest line CI runs (the parser stays pinned to Babel 7.x)", () => {
-    expect(pkg.engines?.node).toMatch(/>=\s*22/);
+  it("targets Node >= 22.20, the first 22.x release whose builds ship OpenSSL 3.5 (the parser stays pinned to Babel 7.x)", () => {
+    // Node 22.0 to 22.19 ship OpenSSL 3.0, which has no ML-KEM TLS groups: the
+    // post-quantum probe cannot run there, and an ML-KEM-only server refuses every handshake.
+    expect(pkg.engines?.node).toBe(">=22.20");
   });
 });

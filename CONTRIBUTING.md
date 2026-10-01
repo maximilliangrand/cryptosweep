@@ -9,10 +9,10 @@ guiding principle, and most review feedback traces back to it:
 
 ## Getting set up
 
-Requires Node >= 22 and pnpm. The post-quantum key-exchange probe and its live
-tests also need the runtime's OpenSSL to be 3.5 or later (check
-`node -p process.versions.openssl`); on an older OpenSSL those tests skip with a
-stated reason.
+Requires Node >= 22.20 and pnpm. The post-quantum key-exchange probe and its
+live tests also need the runtime's OpenSSL to be 3.5 or later (check
+`node -p process.versions.openssl`; Node 22.0 to 22.19 ship OpenSSL 3.0); on an
+older OpenSSL those tests skip with a stated reason.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -24,7 +24,7 @@ runs them on Node 22 and 26, and also fails if the build leaves the tree
 different from what was committed. Run them locally:
 
 ```bash
-pnpm typecheck   # tsc --noEmit, strict
+pnpm typecheck   # tsc --noEmit, strict, for src/, tests/ and viewer/
 pnpm lint        # eslint
 pnpm test        # vitest; no internet access (live TLS tests use loopback servers)
 pnpm build       # regenerates src/output/viewer-shell.ts, then tsup
@@ -37,6 +37,11 @@ bundle is reproducible from the lockfile, so CI can check it.
 
 - `src/asn1.ts`, `src/crypto.ts`: the parsing and classification core. Changes here
   need real-input tests (see `tests/fixtures/certs/`, generated with OpenSSL).
+- `src/algorithms.ts`: the algorithm-label vocabulary the CBOM and the risk engine
+  share. A scanner that emits a new label needs a row here;
+  `tests/algorithm-vocabulary.test.ts` fails until it has one.
+- `src/scanners/walk-policy.ts`: what both directory walkers skip, and which
+  paths count as documentation, tests, fixtures or examples.
 - `src/scanners/`: the TLS, source, and dependency scanners.
 - `src/output/`: JSON, Markdown, CBOM, SARIF, and HTML projections of one `Finding`
   model. New output formats go here and read only from that model.
@@ -74,7 +79,6 @@ Every entry must:
 
 The scanner ingests untrusted input (arbitrary hosts, repositories, and, through
 the MCP server, tool arguments written by a model). If you find a way to make it
-reach an internal address, execute code, or exhaust resources, please report it
-to the maintainer privately (contact details are on the
-[maintainer's GitHub profile](https://github.com/maximilliangrand)) rather than
-in a public issue.
+reach an internal address, read outside the MCP root, execute code, or exhaust
+resources, do not open a public issue with the details: [SECURITY.md](SECURITY.md)
+says what counts and how to reach the maintainer privately.

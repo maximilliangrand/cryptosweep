@@ -6,6 +6,89 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Fixes from a re-audit of the 0.2.0 fixes. Several 0.2.0 verdicts were still
+wrong; they are listed here so nobody relies on them.
+
+### Security
+
+- **The MCP server answered whether files outside its root existed.**
+  Classifying a target stat'ed it before confinement, so
+  `a/../../../Users/x/.ssh/id_ed25519` answered "is a file" and a missing
+  path triggered a DNS lookup for `a`. Path-shaped targets are now confined
+  lexically before any I/O, every path outside the root gets the same
+  refusal, and classification only stats inside the root.
+- **`--allow-private` turned off clone address pinning.** The clone skipped
+  resolution, so git resolved the host itself. It is now resolved once and
+  pinned, as TLS connections are.
+- **Cancellation did not stop the work.** A cancelled MCP directory or TLS
+  scan ran to completion; now the walks, the TLS sockets and the clone all
+  stop. Ctrl-C (SIGINT/SIGTERM) on the CLI or MCP server aborts the scan and
+  removes partial clones, where it used to leave `/tmp/cryptosweep-*` behind;
+  the CLI exits 130/143.
+- Added SECURITY.md: what counts as a vulnerability and how to report one
+  privately.
+
+### Fixed
+
+- **Classically broken crypto was on the quantum clock.** DH and DHE below
+  2048 bits, P-192 keys and source-code signatures over SHA-1/MD5 were rated
+  high or critical yet came out "on-track". Scanners now record why a
+  finding is broken today (`Finding.classicalBreak`) and the risk engine
+  puts it on the act-now board.
+- **CNSA 2.0 gave a non-compliant server a clean count.** An X25519MLKEM768
+  server with an ECDSA P-256 leaf reported 0 CNSA 2.0 assets under
+  `government-cui`. Every public-key asset outside ML-KEM-1024 and ML-DSA-87
+  now counts against CNSA 2.0, whatever its Mosca status
+  (`Finding.cnsa2`). HashML-DSA, HashSLH-DSA, HSS/LMS and XMSS OIDs are
+  recognised.
+- **The CBOM typed many algorithms as `unknown`**, including a regression for
+  RSASSA-PSS certificate signatures (`rsassaPss-sha256`), DH/DHE/FFDHE, static
+  RSA key exchange, EC, HMAC-MD5, PBKDF2-SHA-1, DES3, ARC2 and the JWE and
+  ES256K JOSE algorithms. The CBOM and the risk engine now share one
+  vocabulary (`src/algorithms.ts`), and a test runs every label the scanners
+  can emit through it.
+- **Documentation, tests and fixtures drove the headline numbers.** Scanning
+  cryptosweep itself as `legal-privileged` reported 3 exposed assets and 90
+  risk-years from a README table and test fixtures. Such findings now carry
+  `location.context` and are listed in `nonProductionAssets`, outside every
+  ledger count; dependency manifests under those paths are de-rated too.
+- **In-tree virtual environments were scanned as source.** The source walker
+  now shares the dependency walker's skip list, extended with `.tox`, `.nox`,
+  tool caches and any directory holding `pyvenv.cfg` or `CACHEDIR.TAG`, and
+  records what it skipped.
+- **The regex fallback reported every quoted "none" as a critical unsigned
+  JWT** once `jsonwebtoken` appeared in a file (500 findings in one 1.1 MB
+  bundle). It now needs an `alg`/`algorithm`/`algorithms` key, and source
+  maps are skipped as generated.
+- **Weak-hash roles were inferred only in JavaScript, and only around the
+  call.** undici's RFC 6455 `Sec-WebSocket-Accept` SHA-1 was act-now. The
+  AST now follows the digest's variable to its next uses, and Python, Go,
+  the JVM and the regex fallback read the names on the match's line.
+- **One TLS endpoint counted as up to three harvest-now assets.** Its key
+  exchange, TLS 1.2 protocol and key-transport leaf key are now one asset.
+- **Version ranges were judged by their first number at high confidence**
+  (`rustls = "0.23"` "predates 0.23.22"), and `cryptography` had the same
+  verdict below and above 48.0.0. Ranges are now read as ranges, a range
+  that admits both sides is low confidence, `cryptography` is vulnerable
+  below 48.0.0, and pip line continuations are joined.
+- **WebCrypto calls with a runtime algorithm produced nothing**, so `jose`
+  scanned clean; they are now `info` markers.
+- **An ML-KEM-only server aborted the scan on a runtime without ML-KEM**;
+  the refusal is now reported (`tls/handshake-refused`) with the rest marked
+  not assessed.
+- Binaries that hold no code (images, fonts, WebAssembly, bytecode) no longer
+  mark coverage partial; PEM SLH-DSA keys use the certificate spelling; JCA
+  MD2 is MD2; leaked post-quantum private keys are `pq_status` safe (still
+  critical); IPv6 evidence is bracketed; a TLS 1.3 protocol finding is no
+  longer "transitional".
+
+### Changed
+
+- `engines.node` is `>=22.20`: Node.js 22.0 to 22.19 ship OpenSSL 3.0, which
+  has no ML-KEM TLS groups.
+- The viewer imports the report types instead of redeclaring them, and
+  `pnpm typecheck` checks it.
+
 ## [0.2.0] - 2026-10-01
 
 This release rolls up everything since 0.1.0, including the fixes from an

@@ -15,8 +15,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 22 is the engines floor; 26 is current. Both ship OpenSSL 3.5+, so the
-        # live ML-KEM probe tests run rather than skip.
+        # 22 is the engines line (>=22.20, the first 22.x with OpenSSL 3.5;
+        # 22.0-22.19 ship OpenSSL 3.0); 26 is current. setup-node resolves the
+        # latest release of each, so the live ML-KEM probe tests run rather than skip.
         node: [22, 26]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
