@@ -29,6 +29,8 @@ export type RuleUsage =
   | "hashing"
   | "mac"
   | "key-material"
+  /** A call whose algorithm is chosen at runtime, so what it does is not known statically. */
+  | "unresolved"
   | "coverage";
 
 export type RuleLanguage = "javascript" | "python" | "go" | "java" | "any";
@@ -405,6 +407,21 @@ const CATALOGUE = {
   "source/webcrypto/eddsa": asymmetric(WEBCRYPTO, "javascript", "EdDSA", "signing", "Ed25519/Ed448 signature via WebCrypto"),
   "source/webcrypto/key-agreement": asymmetric(WEBCRYPTO, "javascript", "ECDH/X25519/X448", "key-agreement", "ECDH/X25519 key agreement via WebCrypto"),
   "source/webcrypto/rsa-oaep": asymmetric(WEBCRYPTO, "javascript", "RSA", "encryption", "RSA-OAEP encryption via WebCrypto"),
+  "source/webcrypto/algorithm-unresolved": {
+    category: "source",
+    title: "WebCrypto call with an algorithm chosen at runtime",
+    primitive: "unknown",
+    usage: "unresolved",
+    findingUsage: [],
+    language: "javascript",
+    api: WEBCRYPTO,
+    confidence: "confirmed",
+    severity: "info",
+    pq: "unknown",
+    recommendation:
+      "The algorithm is computed at runtime (a variable, a parameter or a helper's return value), so this call site could not be classified; libraries such as jose route RSA, ECDSA, EdDSA, RSA-OAEP and ECDH-ES through calls like this. Trace the values that reach it and inventory the asymmetric ones.",
+    references: [REFS.ir8547],
+  },
 
   // ---------- JSON Web Tokens ----------
   ...jwtRules("jsonwebtoken", "jsonwebtoken", "javascript"),
@@ -1092,8 +1109,14 @@ function webCryptoCurveLabel(prefix: string, curve: string | undefined): string 
   return curve ? `${prefix}-${curve}` : prefix;
 }
 
+/** A WebCrypto call the AST saw with an algorithm it could not resolve: still a site to inventory. */
+function webCryptoUnresolved(f: CallFacts): RuleSelection {
+  return { rule: "source/webcrypto/algorithm-unresolved", detail: `${f.method}, algorithm set at runtime` };
+}
+
 /** `generateKey` / `importKey` / `unwrapKey`: a key of this algorithm now exists. */
 function webCryptoKey(f: CallFacts): RuleSelection | null {
+  if (f.dynamic) return webCryptoUnresolved(f);
   const family = webCryptoFamily(f.token);
   const name = f.token ?? "";
   const detail = `${f.method} ${name}`;
@@ -1123,6 +1146,7 @@ function webCryptoKey(f: CallFacts): RuleSelection | null {
 }
 
 function webCryptoSign(f: CallFacts): RuleSelection | null {
+  if (f.dynamic) return webCryptoUnresolved(f);
   const detail = `${f.method} ${f.token ?? ""}`;
   switch (webCryptoFamily(f.token)) {
     case "rsa-sig":
@@ -1137,6 +1161,7 @@ function webCryptoSign(f: CallFacts): RuleSelection | null {
 }
 
 function webCryptoDerive(f: CallFacts): RuleSelection | null {
+  if (f.dynamic) return webCryptoUnresolved(f);
   const family = webCryptoFamily(f.token);
   if (family === "ecdh") return { rule: "source/webcrypto/key-agreement", algorithm: "ECDH", detail: `${f.method} ECDH` };
   if (family === "xdh") {
@@ -1147,6 +1172,7 @@ function webCryptoDerive(f: CallFacts): RuleSelection | null {
 }
 
 function webCryptoEncrypt(f: CallFacts): RuleSelection | null {
+  if (f.dynamic) return webCryptoUnresolved(f);
   return webCryptoFamily(f.token) === "rsa-oaep"
     ? { rule: "source/webcrypto/rsa-oaep", algorithm: "RSA-OAEP", detail: `${f.method} RSA-OAEP` }
     : null;
@@ -1347,7 +1373,8 @@ function jsParams(after: string): Record<string, string | number> {
 
 function webCryptoRegex(method: string, after: string): RuleSelection | null {
   const name = WEBCRYPTO_NAME.exec(after)?.[1] ?? null;
-  const facts = factsFor(method, name, jsParams(after));
+  // A regex cannot tell a runtime algorithm from a static symmetric one (AES-GCM), so it never reports one as unresolved.
+  const facts = { ...factsFor(method, name, jsParams(after)), dynamic: false };
   switch (method) {
     case "generateKey":
     case "importKey":

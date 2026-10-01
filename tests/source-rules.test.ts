@@ -41,6 +41,7 @@ const SNIPPETS: ReadonlyArray<readonly [file: string, code: string, rule: string
   ["a.js", 'crypto.subtle.sign({ name: "Ed25519" }, key, data);', "source/webcrypto/eddsa"],
   ["a.js", 'crypto.subtle.deriveKey({ name: "X25519", public: peer }, priv, aes, false, ["encrypt"]);', "source/webcrypto/key-agreement"],
   ["a.js", 'crypto.subtle.wrapKey("raw", key, wrapper, { name: "RSA-OAEP" });', "source/webcrypto/rsa-oaep"],
+  ["a.js", "function s(alg, key, data) { return crypto.subtle.sign(alg, key, data); }", "source/webcrypto/algorithm-unresolved"],
   ["a.js", 'const jwt = require("jsonwebtoken");\njwt.sign(p, k, { algorithm: "none" });', "jwt/jsonwebtoken/alg-none"],
   ["a.js", 'const jwt = require("jsonwebtoken");\njwt.sign(p, k, { algorithm: "HS256" });', "jwt/jsonwebtoken/hmac"],
   ["a.js", 'const jwt = require("jsonwebtoken");\njwt.sign(p, k, { algorithm: "PS384" });', "jwt/jsonwebtoken/rsa"],
