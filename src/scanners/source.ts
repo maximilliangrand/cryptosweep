@@ -14,8 +14,12 @@
  * Every finding carries a stable `ruleId` and a repository-relative,
  * forward-slash path. Whatever the walk could not analyse (unreadable,
  * oversized, binary, over a resource ceiling) is reported as an `info` coverage
- * finding, so a clean result never hides a gap. Directory entries are visited
- * in sorted order, so finding order and ids do not depend on the filesystem.
+ * finding, so a clean result never hides a gap. What it skips by design
+ * (walk-policy.ts: dependency, build, virtual-environment and cache
+ * directories; source maps and non-code binaries) is recorded the same way,
+ * without counting as a gap. Matches under documentation, test, fixture and
+ * example paths carry `location.context`. Directory entries are visited in
+ * sorted order, so finding order and ids do not depend on the filesystem.
  * Remote repositories are cloned by clone.ts, behind the SSRF guard.
  */
 import { createPublicKey } from "node:crypto";
@@ -25,13 +29,14 @@ import type { Dirent } from "node:fs";
 import { open, opendir } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
-import type { Category, Confidence, Finding, Severity } from "../report";
+import type { Category, Confidence, Finding, NonProductionContext, Severity } from "../report";
 import { curveFriendlyName, keyAlgorithmLabel } from "../crypto";
 import type { KeyType } from "../crypto";
 import { isJsTsFile, scanJsAst } from "./source-ast";
 import type { ScanJsResult } from "./source-ast";
 import { REGEX_MATCHERS, REGEX_WINDOW_CHARS, assess, sourceRule } from "./source-rules";
 import type { RegexLanguage, RegexMatcher, RuleHit, RuleId, RuleSelection } from "./source-rules";
+import { DEFAULT_IGNORE_DIRS, SKIP_MARKERS, UNREPORTED_SKIPS, directoryContext } from "./walk-policy";
 
 export interface SourceScanOptions {
   /** Directories skipped during the walk. */
@@ -56,17 +61,17 @@ const MAX_FINDINGS_PER_FILE = 500;
 /** How many paths a coverage finding names; the rest are counted only. */
 const MAX_NAMED_PATHS = 10;
 
-const DEFAULT_IGNORE_DIRS = new Set([
-  "node_modules",
-  ".git",
-  "dist",
-  "build",
-  "coverage",
-  ".next",
-  "out",
-  "vendor",
-  ".turbo",
-]);
+/**
+ * Binary files whose extension says they hold no source code or PEM text:
+ * images, fonts, audio and video, documents, WebAssembly and Python bytecode.
+ * Skipping one is recorded, but is not a coverage gap. Any other binary is a
+ * gap, key stores (`.der`, `.p12`, `.pfx`, `.jks`) included.
+ */
+const NON_CODE_BINARY =
+  /\.(?:png|jpe?g|gif|webp|avif|ico|icns|bmp|tiff?|psd|woff2?|ttf|otf|eot|mp3|mp4|m4a|wav|ogg|oga|flac|webm|mov|avi|pdf|wasm|pyc|pyo)$/i;
+
+/** Source maps: generated from sources that are scanned in their own right (their `sourcesContent` would double-count them). */
+const SOURCE_MAP = /\.(?:[cm]?[jt]sx?|css)\.map$/i;
 
 /** A bounded sample of paths for a coverage finding. */
 interface PathSample {
@@ -462,18 +467,14 @@ function regexHits(text: string, language: RegexLanguage): RuleHit[] {
  * example, so we lower its severity and mark the finding low-confidence rather
  * than crying wolf. Recall is preserved, nothing is dropped, only calibrated.
  */
-type FileContext = "source" | "docs" | "test";
+type FileContext = "source" | NonProductionContext;
 
 function classifyFile(relPath: string): FileContext {
   const p = relPath.toLowerCase();
-  if (/\.(md|mdx|markdown|rst|txt|adoc)$/.test(p) || /(^|\/)docs?\//.test(p)) return "docs";
-  if (
-    /\.(test|spec|stories)\.[a-z0-9]+$/.test(p) ||
-    /(^|\/)(tests?|__tests__|__mocks__|__fixtures__|fixtures?|examples?|e2e|mocks?)\//.test(p)
-  ) {
-    return "test";
-  }
-  return "source";
+  const directory = directoryContext(relPath);
+  if (/\.(md|mdx|markdown|rst|txt|adoc)$/.test(p) || directory === "docs") return "docs";
+  if (/\.(test|spec|stories)\.[a-z0-9]+$/.test(p)) return "test";
+  return directory ?? "source";
 }
 
 const SEVERITY_LADDER: readonly Severity[] = ["critical", "high", "medium", "low", "info"];
@@ -546,7 +547,7 @@ function toFinding(hit: RuleHit, relPath: string, context: FileContext, lines: L
     category: a.rule.category,
     title: a.title,
     evidence: `${relPath}:${line}`,
-    location: { path: relPath, line },
+    location: { path: relPath, ...(context === "source" ? {} : { context }), line },
     pq_status: a.pq,
     confidence,
     ...(a.algorithm ? { algorithm: a.algorithm } : {}),
@@ -650,6 +651,10 @@ interface WalkState {
   readonly binary: PathSample;
   readonly capped: PathSample;
   readonly fallback: PathSample;
+  /** Directories skipped by policy (dependencies, build output, virtual environments, caches). */
+  readonly skippedDirs: PathSample;
+  /** Source maps and non-code binaries, skipped without leaving a coverage gap. */
+  readonly nonCode: PathSample;
 }
 
 /** Repository-relative, forward-slash path (SARIF and every finding use the same base). */
@@ -729,7 +734,7 @@ async function scanFile(full: string, relPath: string, state: WalkState): Promis
     state.bytes -= sniffed;
     state.bytesRead += sniffed;
     if (buffer.subarray(0, sniffed).includes(0)) {
-      record(state.binary, relPath);
+      record(NON_CODE_BINARY.test(relPath) ? state.nonCode : state.binary, relPath);
       return;
     }
     if (info.size - sniffed > state.bytes) {
@@ -750,12 +755,21 @@ async function scanFile(full: string, relPath: string, state: WalkState): Promis
   }
 }
 
+/** True when a listed directory (below the root) carries a marker that makes it not the project's code. */
+function hasSkipMarker(entries: readonly Dirent[]): boolean {
+  return entries.some((entry) => entry.isFile() && SKIP_MARKERS.has(entry.name));
+}
+
 async function walk(dir: string, state: WalkState): Promise<void> {
   let listing: { entries: Dirent[]; truncated: boolean };
   try {
     listing = await listDirectory(dir);
   } catch {
     record(state.unreadable, toRelative(state.rootDir, dir) || ".");
+    return;
+  }
+  if (dir !== state.rootDir && hasSkipMarker(listing.entries)) {
+    record(state.skippedDirs, toRelative(state.rootDir, dir));
     return;
   }
   if (listing.truncated) state.truncated = true;
@@ -768,8 +782,11 @@ async function walk(dir: string, state: WalkState): Promise<void> {
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
       if (!state.ignoreDirs.has(entry.name)) await walk(full, state);
+      else if (!UNREPORTED_SKIPS.has(entry.name)) record(state.skippedDirs, toRelative(state.rootDir, full));
     } else if (entry.isFile()) {
-      await scanFile(full, toRelative(state.rootDir, full), state);
+      const relPath = toRelative(state.rootDir, full);
+      if (SOURCE_MAP.test(entry.name)) record(state.nonCode, relPath);
+      else await scanFile(full, relPath, state);
     }
   }
 }
@@ -788,6 +805,16 @@ function coverageFindings(state: WalkState, maxFiles: number, maxTotalBytes: num
     `${n(state.oversized)} file(s) above the ${megabytes} MB per-file limit were not analysed, coverage is incomplete`,
   );
   add(state.binary, "source/binary-skipped", `${n(state.binary)} binary-looking file(s) were not analysed`);
+  add(
+    state.skippedDirs,
+    "source/directories-skipped",
+    `${n(state.skippedDirs)} dependency, build, virtual-environment or cache director(ies) were skipped by default`,
+  );
+  add(
+    state.nonCode,
+    "source/non-code-skipped",
+    `${n(state.nonCode)} source map(s) and non-code binary file(s) (images, fonts, media, WebAssembly, bytecode) were not analysed`,
+  );
   add(
     state.capped,
     "source/findings-capped",
@@ -831,6 +858,8 @@ export async function scanSource(rootDir: string, options: SourceScanOptions = {
     binary: newSample(),
     capped: newSample(),
     fallback: newSample(),
+    skippedDirs: newSample(),
+    nonCode: newSample(),
   };
   await walk(rootDir, state);
   return [...state.findings, ...coverageFindings(state, maxFiles, maxTotalBytes)];

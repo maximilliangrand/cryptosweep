@@ -230,8 +230,18 @@ const SOURCE_SCOPE =
   "other text files by the JavaScript regex sweep; PEM key blocks in every file";
 const DEPS_SCOPE = "dependency manifests and lockfiles for npm, PyPI and Cargo, matched against the built-in registry";
 
-function coverageOf(check: "source" | "deps", scope: string, findings: readonly Finding[]): CoverageEntry {
-  const gaps = findings.filter((f) => f.ruleId !== undefined && COVERAGE_GAP_RULES[f.ruleId] === check).map((f) => f.title);
+/** What a check skips by design: recorded in its scope, never counted as a gap. */
+const BY_DESIGN_RULES: Readonly<Record<string, "source" | "deps">> = {
+  "source/directories-skipped": "source",
+  "source/non-code-skipped": "source",
+};
+
+function coverageOf(check: "source" | "deps", baseScope: string, findings: readonly Finding[]): CoverageEntry {
+  const titlesFor = (rules: Readonly<Record<string, "source" | "deps">>): string[] =>
+    findings.filter((f) => f.ruleId !== undefined && rules[f.ruleId] === check).map((f) => f.title);
+  const gaps = titlesFor(COVERAGE_GAP_RULES);
+  const skipped = titlesFor(BY_DESIGN_RULES);
+  const scope = skipped.length > 0 ? `${baseScope}; skipped by design: ${skipped.join("; ")}` : baseScope;
   return gaps.length === 0 ? { check, scope, complete: true } : { check, scope, complete: false, note: gaps.join("; ") };
 }
 

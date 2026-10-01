@@ -9,14 +9,17 @@
  * parse (go.mod, pom.xml, Gemfile.lock, ...), a manifest over the size limit,
  * and a walk stopped at its budget each produce an `info` finding, so "no
  * findings" never silently means "not analysed". Sizes are checked on the open
- * handle before any read, and entries are visited in sorted order.
+ * handle before any read, and entries are visited in sorted order. The walk
+ * shares the source scanner's skip policy (walk-policy.ts), and a manifest
+ * under a test, fixture, example or documentation tree is de-rated the way a
+ * source match there is.
  */
 import { constants } from "node:fs";
 import type { Dirent } from "node:fs";
 import { open, opendir } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
-import type { Confidence, Finding, PqStatus, Reference, Severity } from "../report";
+import type { Confidence, Finding, NonProductionContext, PqStatus, Reference, Severity } from "../report";
 import type { Ecosystem, RegistryEntry } from "./deps/registry";
 import { depsRuleId, lookupEntry } from "./deps/registry";
 import { REFS } from "../crypto";
@@ -32,6 +35,7 @@ import {
 import { parseCargoLock, parseCargoToml } from "./deps/parsers/cargo";
 import { annotateWithAdvisories } from "./deps/advisories";
 import type { AdvisoryOptions } from "./deps/advisories";
+import { DEFAULT_IGNORE_DIRS, SKIP_MARKERS, directoryContext } from "./walk-policy";
 
 export type { ParsedDep } from "./deps/parsers/npm";
 
@@ -46,22 +50,6 @@ export interface DepsScanOptions {
   /** Opt-in OSV.dev advisory enrichment (network). Off unless enabled. */
   advisories?: AdvisoryOptions;
 }
-
-const DEFAULT_IGNORE_DIRS = new Set([
-  "node_modules",
-  ".git",
-  "dist",
-  "build",
-  "coverage",
-  ".next",
-  "out",
-  "vendor",
-  ".turbo",
-  "target", // rust build output
-  ".venv",
-  "venv",
-  "__pycache__",
-]);
 
 const DEFAULT_MAX_FILE_BYTES = 5_000_000;
 const DEFAULT_MAX_ENTRIES = 500_000;
@@ -159,9 +147,23 @@ function dedupeByLabel(refs: Reference[]): Reference[] {
   return out;
 }
 
+const SEVERITY_LADDER: readonly Severity[] = ["critical", "high", "medium", "low", "info"];
+
+/**
+ * A manifest under a test, fixture, example or documentation tree declares
+ * what that tree needs, not what ships, so it gets the source scanner's
+ * calibration: two severity steps down and `low` confidence.
+ */
+function calibrate(a: Assessment, manifestPath: string): Assessment & { context?: NonProductionContext } {
+  const context = directoryContext(manifestPath);
+  if (!context) return a;
+  const severity = SEVERITY_LADDER[Math.min(SEVERITY_LADDER.length - 1, SEVERITY_LADDER.indexOf(a.severity) + 2)] ?? "info";
+  return { ...a, severity, confidence: "low", context };
+}
+
 function toFinding(dep: ParsedDep, entry: RegistryEntry, ids: IdAllocator): Finding {
   const versionLabel = dep.version || "*";
-  const a = assess(dep, entry);
+  const a = calibrate(assess(dep, entry), dep.manifestPath);
   return {
     id: ids.next(),
     ruleId: depsRuleId(entry),
@@ -169,7 +171,7 @@ function toFinding(dep: ParsedDep, entry: RegistryEntry, ids: IdAllocator): Find
     category: "deps",
     title: `${entry.name} (${dep.ecosystem}): ${entry.reason}`,
     evidence: `${dep.manifestPath}:${dep.name}@${versionLabel}`,
-    location: { path: dep.manifestPath },
+    location: { path: dep.manifestPath, ...(a.context ? { context: a.context } : {}) },
     pq_status: a.pq_status,
     confidence: a.confidence,
     recommendation: a.recommendation,
@@ -370,6 +372,8 @@ async function findManifests(dir: string, walk: DepsWalk): Promise<void> {
   } catch {
     return; // unreadable directories are reported by the source walk over the same tree
   }
+  // A virtual environment or cache directory below the root is not the project's (see walk-policy.ts).
+  if (dir !== walk.rootDir && entries.some((entry) => entry.isFile() && SKIP_MARKERS.has(entry.name))) return;
   const parentDir = dir === walk.rootDir ? "" : (dir.split(sep).pop() ?? "");
   for (const entry of entries) {
     if (entry.isSymbolicLink()) continue;

@@ -65,7 +65,10 @@ export interface CryptoAsset {
 }
 
 export interface HarvestLedger {
+  /** Production assets; every count below is over these. */
   totalAssets: number;
+  /** Assets seen only in documentation, tests, fixtures or examples, which no count includes. */
+  nonProductionAssets: number;
   exposedAssets: number;
   overdueAssets: number;
   actNowAssets: number;
@@ -108,6 +111,13 @@ export interface RiskModel {
     migrationYears: EstateProfile["migrationYears"];
   };
   assets: CryptoAsset[];
+  /**
+   * Assets whose every finding sits in documentation, tests, fixtures or
+   * examples (`Location.context`). Their verdicts are computed the same way,
+   * but they stay out of the ledger, the obligation counts and the graph: a
+   * README table or a test fixture is not the estate's exposure.
+   */
+  nonProductionAssets: CryptoAsset[];
   ledger: HarvestLedger;
   graph: CryptoGraph;
 }
@@ -418,12 +428,16 @@ interface AssetDraft {
 /** Assess a report against a profile: assets + Mosca verdicts + ledger + graph. */
 export function assessRisk(target: string, findings: Finding[], profile: EstateProfile): RiskModel {
   assertProfileUsable(profile);
-  const drafts = new Map<string, AssetDraft>();
+  const production = new Map<string, AssetDraft>();
+  const nonProduction = new Map<string, AssetDraft>();
   for (const raw of findings) {
     const f = normalizeFinding(raw);
     const assessment = assessThreat(f);
     const v = worstVerdict(assessment, f.category, profile);
     const key = assetKey(f);
+    // Documentation, tests, fixtures and examples are inventoried apart, so a
+    // README table or a fixture key never stands in for the estate's exposure.
+    const drafts = f.location?.context ? nonProduction : production;
     const existing = drafts.get(key);
     if (!existing) {
       drafts.set(key, {
@@ -449,8 +463,11 @@ export function assessRisk(target: string, findings: Finding[], profile: EstateP
     if (STATUS_URGENCY[v.status] < STATUS_URGENCY[existing.verdict.status]) existing.verdict = v;
   }
 
-  const assets: CryptoAsset[] = [...drafts.values()].map(({ asset, verdict: v }) => ({ ...asset, verdict: v }));
-  const ledger = buildLedger(assets, profile.dataClass);
+  const toAssets = (drafts: Map<string, AssetDraft>): CryptoAsset[] =>
+    [...drafts.values()].map(({ asset, verdict: v }) => ({ ...asset, verdict: v }));
+  const assets = toAssets(production);
+  const nonProductionAssets = toAssets(nonProduction);
+  const ledger = buildLedger(assets, nonProductionAssets.length, profile.dataClass);
   const graph = buildGraph(target, assets, profile.dataClass);
 
   return {
@@ -464,6 +481,7 @@ export function assessRisk(target: string, findings: Finding[], profile: EstateP
       migrationYears: profile.migrationYears,
     },
     assets,
+    nonProductionAssets,
     ledger,
     graph,
   };
@@ -494,7 +512,7 @@ function breaches(asset: CryptoAsset, obligation: Obligation): boolean {
   return scope !== null && obligation.scopes.includes(scope);
 }
 
-function buildLedger(assets: CryptoAsset[], dataClass: DataClass): HarvestLedger {
+function buildLedger(assets: CryptoAsset[], nonProductionAssets: number, dataClass: DataClass): HarvestLedger {
   const exposed = assets.filter((a) => a.verdict.threat === "harvest-now" && a.verdict.status === "exposed");
   const overdue = assets.filter((a) => a.verdict.status === "overdue").length;
   const actNow = assets.filter((a) => a.verdict.status === "act-now").length;
@@ -506,7 +524,7 @@ function buildLedger(assets: CryptoAsset[], dataClass: DataClass): HarvestLedger
     assets: assets.filter((a) => breaches(a, o)).length,
   }));
 
-  const headline =
+  const verdictLine =
     exposed.length > 0
       ? `${exposed.length} asset(s) protecting ${dataClass.label.toLowerCase()} data are already exposed to harvest-now-decrypt-later (${exposureRiskYears.toFixed(0)} sensitivity-weighted risk-years accruing).`
       : overdue > 0
@@ -514,9 +532,14 @@ function buildLedger(assets: CryptoAsset[], dataClass: DataClass): HarvestLedger
         : actNow > 0
           ? `No harvest-now-decrypt-later exposure at the current data horizon, but ${actNow} asset(s) are broken today without a quantum computer (act now).`
           : "No harvest-now-decrypt-later exposure at the current data horizon and quantum assumption.";
+  const headline =
+    nonProductionAssets > 0
+      ? `${verdictLine} ${nonProductionAssets} asset(s) seen only in documentation, tests, fixtures or examples are listed separately and not counted.`
+      : verdictLine;
 
   return {
     totalAssets: assets.length,
+    nonProductionAssets,
     exposedAssets: exposed.length,
     overdueAssets: overdue,
     actNowAssets: actNow,

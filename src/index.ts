@@ -8,6 +8,7 @@ export type {
   CryptoUsage,
   Finding,
   Location,
+  NonProductionContext,
   PackageCoordinates,
   PqStatus,
   ProtocolDetails,

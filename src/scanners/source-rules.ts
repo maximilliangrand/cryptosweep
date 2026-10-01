@@ -516,6 +516,14 @@ const CATALOGUE = {
     "Binary-looking files were not analysed",
     "Binary files (DER keys, keystores, archives, compiled code) are not parsed. Check that none of them is key material.",
   ),
+  "source/directories-skipped": coverage(
+    "Dependency, build, virtual-environment and cache directories skipped by default",
+    "These directories hold installed dependencies, build output, Python virtual environments or tool caches, not the project's own code; installed dependencies are covered by the manifest scan instead. To include one, scan it directly (the same defaults then apply below it).",
+  ),
+  "source/non-code-skipped": coverage(
+    "Source maps and non-code binary files not analysed",
+    "Source maps repeat the sources they were generated from, and images, fonts, media, WebAssembly and Python bytecode hold no source code or PEM text to match. They are listed for completeness and are not a coverage gap.",
+  ),
   "source/findings-capped": coverage(
     "Files with more matches than the per-file cap",
     "Only the first matches in these files are reported. Review each file as a whole.",

@@ -25,10 +25,19 @@ export interface Reference {
   url?: string;
 }
 
+/**
+ * A path that is not production code: documentation, or a test, fixture or
+ * example tree. A match there may not be a live code path, so the scanners
+ * de-rate it and the risk engine keeps it out of the ledger.
+ */
+export type NonProductionContext = "docs" | "test";
+
 /** Where a finding was observed, in structured form (for SARIF / drill-down). */
 export interface Location {
   /** Repo-relative file path, when the finding comes from source/deps. */
   path?: string;
+  /** Set when `path` is documentation or test, fixture or example code; absent for production code. */
+  context?: NonProductionContext;
   /** 1-indexed line, when known. */
   line?: number;
   /** Host, when the finding comes from a network probe. */
