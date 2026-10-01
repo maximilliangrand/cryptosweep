@@ -1,0 +1,8 @@
+# cryptosweep detects committed private keys, so its tests and fixtures
+# contain throwaway keys on purpose. Scan everything else as normal.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Intentional test keys for the private-key detector and local TLS servers"
+paths = ['''^tests/''']
