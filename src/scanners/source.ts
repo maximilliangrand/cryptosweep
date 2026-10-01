@@ -34,7 +34,7 @@ import { curveFriendlyName, keyAlgorithmLabel } from "../crypto";
 import type { KeyType } from "../crypto";
 import { isJsTsFile, scanJsAst } from "./source-ast";
 import type { ScanJsResult } from "./source-ast";
-import { REGEX_MATCHERS, REGEX_WINDOW_CHARS, assess, sourceRule } from "./source-rules";
+import { REGEX_MATCHERS, REGEX_WINDOW_CHARS, assess, sourceRule, withLineRole } from "./source-rules";
 import type { RegexLanguage, RegexMatcher, RuleHit, RuleId, RuleSelection } from "./source-rules";
 import { DEFAULT_IGNORE_DIRS, SKIP_MARKERS, UNREPORTED_SKIPS, directoryContext } from "./walk-policy";
 
@@ -435,6 +435,18 @@ function* matchAll(content: string, pattern: RegExp): Generator<{ index: number;
   }
 }
 
+/** Characters either side of a match read as its line, for weak-hash role inference. */
+const LINE_CONTEXT_CHARS = 160;
+
+/** The match's own line, at most {@link LINE_CONTEXT_CHARS} either side of it, without the match. */
+function lineAround(text: string, start: number, end: number): string {
+  const before = text.slice(Math.max(0, start - LINE_CONTEXT_CHARS), start);
+  const after = text.slice(end, end + LINE_CONTEXT_CHARS);
+  const newlineBefore = before.lastIndexOf("\n");
+  const newlineAfter = after.indexOf("\n");
+  return `${newlineBefore < 0 ? before : before.slice(newlineBefore + 1)} ${newlineAfter < 0 ? after : after.slice(0, newlineAfter)}`;
+}
+
 /** Run one language's regex matchers; every match is `medium` evidence. */
 function regexHits(text: string, language: RegexLanguage): RuleHit[] {
   const hits: RuleHit[] = [];
@@ -451,7 +463,9 @@ function regexHits(text: string, language: RegexLanguage): RuleHit[] {
     for (const { index, match } of matchAll(text, matcher.pattern)) {
       const end = index + match[0].length;
       const after = text.slice(end, end + REGEX_WINDOW_CHARS);
-      for (const selection of matcher.classify(match, after)) hits.push({ index, tier: "medium", selection });
+      for (const selection of matcher.classify(match, after)) {
+        hits.push({ index, tier: "medium", selection: withLineRole(selection, () => lineAround(text, index, end)) });
+      }
     }
   }
   return hits;

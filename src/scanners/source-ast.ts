@@ -41,7 +41,7 @@ import type {
   VariableDeclarator,
 } from "@babel/types";
 import type { Confidence } from "../report";
-import { JOSE_BUILDERS, JS_CALL_MATCHERS } from "./source-rules";
+import { JOSE_BUILDERS, JS_CALL_MATCHERS, roleOfName } from "./source-rules";
 import type { CallFacts, HashRole, JsApi, JsArgument, JsCallMatcher, RuleHit } from "./source-rules";
 
 const JS_TS_EXT = /\.(?:js|jsx|mjs|cjs|ts|tsx|mts|cts)$/i;
@@ -50,6 +50,9 @@ const MAX_PARSE_BYTES = 1_000_000;
 const MAX_RESOLVE_DEPTH = 64;
 /** Names read from the surrounding code when judging a digest's role. */
 const MAX_CONTEXT_NAMES = 24;
+/** Statements after a digest's declaration searched for its uses, and the nodes walked there. */
+const MAX_USE_STATEMENTS = 16;
+const MAX_USE_NODES = 2_000;
 /** Scalar properties read from one options / algorithm object. */
 const MAX_OBJECT_PARAMS = 32;
 
@@ -257,66 +260,72 @@ function findProperty(object: ObjectExpression, key: string): PropertyLookup {
 // Role of a weak digest, inferred from the names around the call
 // ---------------------------------------------------------------------------
 
-/** Substrings strong enough to mark a security use on their own. */
-const SECURITY_SUBSTRINGS = ["password", "passwd", "passphrase", "secret", "signature", "credential", "hmac", "integrity"];
-const SECURITY_WORDS: ReadonlySet<string> = new Set([
-  "pwd",
-  "token",
-  "sign",
-  "signed",
-  "signer",
-  "signing",
-  "verify",
-  "verifier",
-  "auth",
-  "authenticate",
-  "authentication",
-  "cert",
-  "certificate",
-  "salt",
-  "nonce",
-  "otp",
-  "session",
-  "apikey",
-  "privatekey",
-  "jwt",
-  "csrf",
-  "login",
-]);
-const NON_SECURITY_SUBSTRINGS = ["entitytag", "cachekey", "cachebust", "checksum", "dedup", "contenthash", "filehash", "assethash", "chunkhash", "objectid", "gitoid"];
-const NON_SECURITY_WORDS: ReadonlySet<string> = new Set(["etag", "cache", "cached", "caching", "oid", "uuid", "shard", "bucket", "partition", "git"]);
-
-/** camelCase / snake_case words, adjacent pairs joined (`E`+`Tag` gives `etag`), lower-cased. */
-function nameWords(name: string): string[] {
-  const spaced = name
-    .slice(0, 64)
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
-  const words = spaced.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-  const pairs: string[] = [];
-  for (let i = 0; i + 1 < words.length; i += 1) pairs.push(`${words[i]}${words[i + 1]}`);
-  return [...words, ...pairs];
-}
-
-function roleOfName(name: string): HashRole | null {
-  const compact = name.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const words = nameWords(name);
-  if (SECURITY_SUBSTRINGS.some((s) => compact.includes(s)) || words.some((w) => SECURITY_WORDS.has(w))) return "security";
-  if (NON_SECURITY_SUBSTRINGS.some((s) => compact.includes(s)) || words.some((w) => NON_SECURITY_WORDS.has(w))) {
-    return "non-security";
-  }
-  return null;
-}
-
 function simpleName(node: Node | null | undefined): string | null {
   if (!node) return null;
   const inner = unwrap(node);
   if (inner.type === "Identifier") return inner.name;
   if (inner.type === "StringLiteral") return inner.value;
-  if ((inner.type === "MemberExpression" || inner.type === "OptionalMemberExpression") && !inner.computed) {
-    return inner.property.type === "Identifier" ? inner.property.name : null;
+  if (inner.type === "MemberExpression" || inner.type === "OptionalMemberExpression") {
+    if (!inner.computed) return inner.property.type === "Identifier" ? inner.property.name : null;
+    return inner.property.type === "StringLiteral" ? inner.property.value : null; // headers["ETag"]
   }
   return null;
+}
+
+/** Concatenations unpacked when reading an argument's names (`key + GUID`), at most this deep. */
+const MAX_CONCAT_DEPTH = 4;
+
+/** The simple names an argument contributes: itself, or each operand of a string concatenation. */
+function argumentNames(node: Node, add: (name: string | null) => void, depth = 0): void {
+  const inner = unwrap(node);
+  if (inner.type === "BinaryExpression" && inner.operator === "+" && depth < MAX_CONCAT_DEPTH) {
+    if (inner.left.type !== "PrivateName") argumentNames(inner.left, add, depth + 1);
+    argumentNames(inner.right, add, depth + 1);
+    return;
+  }
+  add(simpleName(inner));
+}
+
+/** The statement list a declaration sits in, when it sits directly in one. */
+function statementList(container: Node): readonly Node[] | null {
+  switch (container.type) {
+    case "Program":
+    case "BlockStatement":
+    case "StaticBlock":
+      return container.body;
+    case "SwitchCase":
+      return container.consequent;
+    default:
+      return null;
+  }
+}
+
+/** Names next to one use of a variable: the call it is passed to, what it is compared with or stored in. */
+function neighbourNames(use: Node, parent: Node, add: (name: string | null) => void): void {
+  switch (parent.type) {
+    case "CallExpression":
+    case "OptionalCallExpression":
+    case "NewExpression":
+      if (!parent.arguments.some((arg) => arg === use)) return;
+      if (parent.callee.type !== "V8IntrinsicIdentifier") add(simpleName(parent.callee));
+      for (const arg of parent.arguments) if (arg !== use) argumentNames(arg, add);
+      return;
+    case "BinaryExpression":
+    case "LogicalExpression": {
+      const other = parent.left === use ? parent.right : parent.left;
+      if (other.type !== "PrivateName") add(simpleName(other));
+      return;
+    }
+    case "AssignmentExpression":
+      if (parent.right === use) add(simpleName(parent.left));
+      return;
+    case "VariableDeclarator":
+    case "ObjectProperty":
+      if ((parent.type === "VariableDeclarator" ? parent.init : parent.value) === use) add(declaredName(parent));
+      return;
+    default:
+      return;
+  }
 }
 
 function declaredName(node: Node | undefined): string | null {
@@ -834,8 +843,9 @@ class Analyzer {
 
   /**
    * Names in the code around the current call (the variables and properties
-   * it is assigned to, the calls it feeds, the enclosing function), used to
-   * tell a password hash from an ETag. A security word anywhere wins.
+   * it is assigned to, the calls it feeds, the enclosing function, and where
+   * the variable it is assigned to is used next), used to tell a password hash
+   * from an ETag. A security word anywhere wins.
    */
   private hashRole(): { role: HashRole; signal: string } | null {
     let nonSecurity: string | null = null;
@@ -852,6 +862,7 @@ class Analyzer {
     const add = (name: string | null): void => {
       if (name && names.length < MAX_CONTEXT_NAMES) names.push(name);
     };
+    let declarator: { index: number; name: string } | null = null;
     for (let i = this.ancestors.length - 2; i >= 0 && names.length < MAX_CONTEXT_NAMES; i -= 1) {
       const node = this.ancestors[i];
       if (!node || node.type === "Program") break;
@@ -861,12 +872,38 @@ class Analyzer {
       }
       if (node.type === "CallExpression" || node.type === "OptionalCallExpression" || node.type === "NewExpression") {
         if (node.callee.type !== "V8IntrinsicIdentifier") add(simpleName(node.callee));
-        for (const arg of node.arguments) add(simpleName(arg));
+        for (const arg of node.arguments) argumentNames(arg, add);
         continue;
+      }
+      if (!declarator && node.type === "VariableDeclarator" && node.id.type === "Identifier") {
+        declarator = { index: i, name: node.id.name };
       }
       add(declaredName(node));
     }
+    if (declarator) this.useSiteNames(declarator.index, declarator.name, add);
     return names;
+  }
+
+  /**
+   * Names around the uses of the variable a digest is assigned to, in the
+   * statements after its declaration: `res.setHeader("ETag", digest)`,
+   * `if (secWSAccept !== digest)`. Bounded, and blind to shadowing in a
+   * nested block, which at worst adds a name from an unrelated variable.
+   */
+  private useSiteNames(declaratorIndex: number, name: string, add: (name: string | null) => void): void {
+    const declaration = this.ancestors[declaratorIndex - 1];
+    const container = this.ancestors[declaratorIndex - 2];
+    const statements = container ? statementList(container) : null;
+    const at = declaration && statements ? statements.indexOf(declaration) : -1;
+    if (!statements || at < 0) return;
+    let budget = MAX_USE_NODES;
+    const visit = (node: Node, parent: Node | null): void => {
+      if (budget <= 0) return;
+      budget -= 1;
+      if (parent && node.type === "Identifier" && node.name === name) neighbourNames(node, parent, add);
+      forEachChild(node, (child) => visit(child, node));
+    };
+    for (const statement of statements.slice(at + 1, at + 1 + MAX_USE_STATEMENTS)) visit(statement, null);
   }
 }
 

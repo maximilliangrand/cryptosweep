@@ -431,11 +431,12 @@ const CATALOGUE = {
   "source/pycryptodome/rsa-signature": asymmetric(PYCRYPTODOME, "python", "RSA", "signing", "RSA signature via PyCryptodome"),
   "source/pycryptodome/dss": asymmetric(PYCRYPTODOME, "python", "ECDSA/DSA", "signing", "ECDSA/DSA signature via PyCryptodome"),
   "source/pycryptodome/weak-hash": weakHash(PYCRYPTODOME, "python", "Weak hash algorithm via PyCryptodome"),
+  "source/pycryptodome/weak-hash-non-security": weakHashNonSecurity(PYCRYPTODOME, "python", "Weak hash in a non-security role via PyCryptodome"),
   "source/pycryptodome/weak-cipher": weakCipher(PYCRYPTODOME, "python", "Weak symmetric cipher via PyCryptodome"),
 
   // ---------- Python: hashlib ----------
   "source/python-hashlib/weak-hash": weakHash(HASHLIB, "python", "Weak hash algorithm via hashlib"),
-  "source/python-hashlib/weak-hash-non-security": weakHashNonSecurity(HASHLIB, "python", "Weak hash declared non-security via hashlib"),
+  "source/python-hashlib/weak-hash-non-security": weakHashNonSecurity(HASHLIB, "python", "Weak hash in a non-security role via hashlib"),
 
   // ---------- Go ----------
   "source/go/keygen-rsa": asymmetric(GO, "go", "RSA", "key-generation", "RSA key generation via Go crypto/rsa"),
@@ -449,6 +450,7 @@ const CATALOGUE = {
   "source/go/ed25519": asymmetric(GO, "go", "EdDSA", "signing", "Ed25519 via Go crypto/ed25519"),
   "source/go/curve25519": asymmetric(GO, "go", "X25519", "key-agreement", "X25519 via golang.org/x/crypto/curve25519"),
   "source/go/weak-hash": weakHash(GO, "go", "Weak hash algorithm via Go crypto/md5 or crypto/sha1"),
+  "source/go/weak-hash-non-security": weakHashNonSecurity(GO, "go", "Weak hash in a non-security role via Go crypto/md5 or crypto/sha1"),
   "source/go/weak-cipher": weakCipher(GO, "go", "Weak symmetric cipher via Go crypto/des or crypto/rc4"),
 
   // ---------- JVM (Java, Kotlin, Scala) ----------
@@ -465,6 +467,7 @@ const CATALOGUE = {
   "source/java/key-agreement": asymmetric(JCA, "java", "ECDH/DH/XDH", "key-agreement", "Key agreement via JCA KeyAgreement"),
   "source/java/rsa-encryption": asymmetric(JCA, "java", "RSA", "encryption", "RSA encryption via JCA Cipher"),
   "source/java/weak-hash": weakHash(JCA, "java", "Weak hash algorithm via JCA MessageDigest"),
+  "source/java/weak-hash-non-security": weakHashNonSecurity(JCA, "java", "Weak hash in a non-security role via JCA MessageDigest"),
   "source/java/weak-cipher": weakCipher(JCA, "java", "Weak symmetric cipher via JCA Cipher"),
 
   // ---------- Key material (every language) ----------
@@ -536,6 +539,15 @@ const CATALOGUE = {
 
 export type RuleId = keyof typeof CATALOGUE;
 
+/** The non-security variant of each role-sensitive weak-hash rule. */
+export const NON_SECURITY_VARIANT: Readonly<Partial<Record<RuleId, RuleId>>> = {
+  "source/node-crypto/weak-hash": "source/node-crypto/weak-hash-non-security",
+  "source/python-hashlib/weak-hash": "source/python-hashlib/weak-hash-non-security",
+  "source/pycryptodome/weak-hash": "source/pycryptodome/weak-hash-non-security",
+  "source/go/weak-hash": "source/go/weak-hash-non-security",
+  "source/java/weak-hash": "source/java/weak-hash-non-security",
+};
+
 export interface SourceRule extends RuleSpec {
   readonly id: RuleId;
 }
@@ -559,6 +571,113 @@ export function sourceRule(id: RuleId): SourceRule {
 // ---------------------------------------------------------------------------
 
 export type HashRole = "security" | "non-security";
+
+/** Substrings strong enough to mark a security use on their own. */
+const SECURITY_SUBSTRINGS = ["password", "passwd", "passphrase", "secret", "signature", "credential", "hmac", "integrity"];
+const SECURITY_WORDS: ReadonlySet<string> = new Set([
+  "pwd",
+  "token",
+  "sign",
+  "signed",
+  "signer",
+  "signing",
+  "verify",
+  "verifier",
+  "auth",
+  "authenticate",
+  "authentication",
+  "cert",
+  "certificate",
+  "salt",
+  "nonce",
+  "otp",
+  "session",
+  "apikey",
+  "privatekey",
+  "jwt",
+  "csrf",
+  "login",
+]);
+/**
+ * Non-security identifiers. The WebSocket handshake (RFC 6455) is one: its
+ * `Sec-WebSocket-Accept` value is the SHA-1 of the client key and a fixed
+ * GUID (258EAFA5-E914-47DA-95CA-C5AB0DC85B11), which proves the server speaks
+ * WebSocket and relies on no collision resistance.
+ */
+const NON_SECURITY_SUBSTRINGS = [
+  "entitytag",
+  "cachekey",
+  "cachebust",
+  "checksum",
+  "dedup",
+  "contenthash",
+  "filehash",
+  "assethash",
+  "chunkhash",
+  "objectid",
+  "gitoid",
+  "websocket",
+  "258eafa5e91447da",
+];
+const NON_SECURITY_WORDS: ReadonlySet<string> = new Set([
+  "etag",
+  "cache",
+  "cached",
+  "caching",
+  "oid",
+  "uuid",
+  "shard",
+  "bucket",
+  "partition",
+  "git",
+  "wsaccept",
+]);
+
+/** camelCase / snake_case words, adjacent pairs joined (`E`+`Tag` gives `etag`), lower-cased. */
+function nameWords(name: string): string[] {
+  const spaced = name
+    .slice(0, 64)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
+  const words = spaced.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const pairs: string[] = [];
+  for (let i = 0; i + 1 < words.length; i += 1) pairs.push(`${words[i]}${words[i + 1]}`);
+  return [...words, ...pairs];
+}
+
+/** The role a name implies for a digest computed next to it, or null when it implies none. */
+export function roleOfName(name: string): HashRole | null {
+  const compact = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const words = nameWords(name);
+  if (SECURITY_SUBSTRINGS.some((s) => compact.includes(s)) || words.some((w) => SECURITY_WORDS.has(w))) return "security";
+  if (NON_SECURITY_SUBSTRINGS.some((s) => compact.includes(s)) || words.some((w) => NON_SECURITY_WORDS.has(w))) {
+    return "non-security";
+  }
+  return null;
+}
+
+/** Identifier-like tokens (dashes kept, so a header name such as `Sec-WebSocket-Accept` stays whole). */
+const LINE_NAME = /[A-Za-z_][A-Za-z0-9_-]{0,63}/g;
+/** Names read from one line of context: enough for an assignment target and a call's arguments. */
+const MAX_LINE_NAMES = 32;
+
+/**
+ * The role the names on a regex match's line give a weak digest: the variable
+ * it is assigned to (`etag = hashlib.md5(...)`), the call it feeds, and the
+ * strings around it. A security word anywhere wins, as in the AST.
+ */
+export function lineRole(line: string): { role: HashRole; signal: string } | null {
+  let nonSecurity: string | null = null;
+  let seen = 0;
+  for (const match of line.matchAll(LINE_NAME)) {
+    seen += 1;
+    if (seen > MAX_LINE_NAMES) break;
+    const role = roleOfName(match[0]);
+    if (role === "security") return { role, signal: match[0] };
+    if (role === "non-security" && nonSecurity === null) nonSecurity = match[0];
+  }
+  return nonSecurity === null ? null : { role: "non-security", signal: nonSecurity };
+}
 
 /** What a matcher concluded about one call site, before file-context calibration. */
 export interface RuleSelection {
@@ -690,6 +809,20 @@ export function assess(hit: RuleHit): Assessment {
     recommendation: [...notes, rule.recommendation].join(" "),
     references,
   };
+}
+
+/**
+ * Give a regex weak-hash selection the role the names on its line imply (the
+ * AST path reads the syntax tree instead). A non-security role moves it to the
+ * rule's non-security variant. `line` is only read for role-sensitive rules.
+ */
+export function withLineRole(selection: RuleSelection, line: () => string): RuleSelection {
+  if (selection.role !== undefined || sourceRule(selection.rule).roleSensitive !== true) return selection;
+  const inferred = lineRole(line());
+  if (!inferred) return selection;
+  if (inferred.role === "security") return { ...selection, role: inferred.role, roleSignal: inferred.signal };
+  const variant = NON_SECURITY_VARIANT[selection.rule];
+  return variant ? { ...selection, rule: variant, role: inferred.role, roleSignal: inferred.signal } : selection;
 }
 
 // ---------------------------------------------------------------------------
