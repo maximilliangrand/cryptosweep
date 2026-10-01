@@ -34,6 +34,7 @@ import {
 } from "./deps/parsers/python";
 import { parseCargoLock, parseCargoToml } from "./deps/parsers/cargo";
 import { annotateWithAdvisories } from "./deps/advisories";
+import { judgeRange } from "./deps/version-range";
 import type { AdvisoryOptions } from "./deps/advisories";
 import { DEFAULT_IGNORE_DIRS, SKIP_MARKERS, directoryContext } from "./walk-policy";
 
@@ -75,17 +76,6 @@ export function extractVersion(spec: string | undefined): number[] | null {
   return parts.every((n) => Number.isFinite(n)) ? parts : null;
 }
 
-/** Compare two numeric versions. Missing components are treated as 0. */
-function compareVersions(a: number[], b: number[]): number {
-  const len = Math.max(a.length, b.length);
-  for (let i = 0; i < len; i += 1) {
-    const x = a[i] ?? 0;
-    const y = b[i] ?? 0;
-    if (x !== y) return x < y ? -1 : 1;
-  }
-  return 0;
-}
-
 interface Assessment {
   severity: Severity;
   pq_status: PqStatus;
@@ -97,14 +87,21 @@ interface Assessment {
  * Assess a dependency against its registry entry, taking the declared version
  * into account when the entry records a `fixedIn`. Libraries that are classical
  * by nature (no `fixedIn`) are flagged at every version, as they should be.
+ *
+ * A declaration is judged as the range it is, not by its first number: an
+ * exact pin or a range capped below `fixedIn` predates it (high confidence),
+ * one whose every version is at or above it is transitional, and one that
+ * admits both (`>=41`, a Cargo `0.23` caret, `*`) leaves the answer to the
+ * lockfile, so it is flagged at low confidence and says so.
  */
 function assess(dep: ParsedDep, entry: RegistryEntry): Assessment {
   if (!entry.fixedIn) {
     return { severity: entry.severity, pq_status: entry.pq_status, confidence: "medium", recommendation: entry.recommendation };
   }
-  const declared = extractVersion(dep.version);
+  const declared = (dep.constraint ?? dep.version).trim();
   const fixed = extractVersion(entry.fixedIn);
-  if (!declared || !fixed) {
+  const verdict = fixed && declared ? judgeRange(declared, fixed) : null;
+  if (!verdict) {
     return {
       severity: entry.severity,
       pq_status: entry.pq_status,
@@ -112,20 +109,29 @@ function assess(dep: ParsedDep, entry: RegistryEntry): Assessment {
       recommendation: `Could not resolve a concrete version; flagged conservatively. The PQ-relevant fix landed in ${entry.name} ${entry.fixedIn}. ${entry.recommendation}`,
     };
   }
-  if (compareVersions(declared, fixed) < 0) {
-    return {
-      severity: entry.severity,
-      pq_status: entry.pq_status,
-      confidence: "high",
-      recommendation: `${dep.name} ${dep.version} predates ${entry.fixedIn}. ${entry.recommendation}`,
-    };
+  switch (verdict.kind) {
+    case "at-or-above":
+      return {
+        severity: "info",
+        pq_status: "transitional",
+        confidence: "high",
+        recommendation: `${dep.name} ${declared} is at or above ${entry.fixedIn}, which carries the PQ-relevant support, confirm it is enabled in configuration.`,
+      };
+    case "below":
+      return {
+        severity: entry.severity,
+        pq_status: entry.pq_status,
+        confidence: "high",
+        recommendation: `${dep.name} ${declared} ${verdict.exact ? "predates" : "only admits releases before"} ${entry.fixedIn}. ${entry.recommendation}`,
+      };
+    case "either":
+      return {
+        severity: entry.severity,
+        pq_status: entry.pq_status,
+        confidence: "low",
+        recommendation: `${dep.name} ${declared} admits releases both before and from ${entry.fixedIn}, so the installed version decides; resolve it from the lockfile (scanning the lockfile with the manifest settles it). ${entry.recommendation}`,
+      };
   }
-  return {
-    severity: "info",
-    pq_status: "transitional",
-    confidence: "high",
-    recommendation: `${dep.name} ${dep.version} is at or above ${entry.fixedIn}, which carries the PQ-relevant support, confirm it is enabled in configuration.`,
-  };
 }
 
 function referencesFor(pq: PqStatus): Reference[] {

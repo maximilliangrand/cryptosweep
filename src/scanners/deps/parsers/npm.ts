@@ -12,6 +12,12 @@ export interface ParsedDep {
   name: string;
   /** Raw version string from the manifest. May be a range like "^1.0.0", or "" if unknown. */
   version: string;
+  /**
+   * The constraint as it applies, when `version` alone does not say it: a
+   * Python specifier with its operators (`>=41,<47`, where `version` is `41`),
+   * or Cargo's implicit caret made explicit (`0.23` declares `^0.23`).
+   */
+  constraint?: string;
   ecosystem: Ecosystem;
   /** Manifest path relative to the scan root (caller-supplied). */
   manifestPath: string;

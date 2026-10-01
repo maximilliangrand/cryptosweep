@@ -48,7 +48,9 @@ export function parseCargoToml(content: string, manifestPath: string): ParsedDep
       if (!version && spec?.workspace === true) version = versionOf(workspace?.[name] ?? workspace?.[alias]);
       if (seen.has(name)) continue;
       seen.add(name);
-      deps.push({ name, version, ecosystem: "cargo", manifestPath });
+      // A bare Cargo.toml requirement is a caret requirement (`0.23` means `^0.23`).
+      const constraint = /^\d/.test(version) ? `^${version}` : undefined;
+      deps.push({ name, version, ecosystem: "cargo", manifestPath, ...(constraint ? { constraint } : {}) });
     }
   }
   return deps;

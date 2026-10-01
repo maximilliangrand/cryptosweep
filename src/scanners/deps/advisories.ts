@@ -52,10 +52,14 @@ interface OsvResult {
   vulns?: Array<{ id?: string }>;
 }
 
-/** A concretely-pinned version has no open-range operator and is purely numeric. */
-function isPinned(version: string | undefined): version is string {
-  const v = (version ?? "").trim();
-  return /^\d+(?:\.\d+)*$/.test(v);
+/**
+ * A concretely-pinned dependency: a purely numeric version, and no wider
+ * constraint behind it. A Python `>=41` keeps only `41` as its version, and a
+ * Cargo `0.23.27` is a caret range; neither names the installed release.
+ */
+function isPinned(dep: ParsedDep): boolean {
+  if (!/^\d+(?:\.\d+)*$/.test(dep.version.trim())) return false;
+  return dep.constraint === undefined || /^={2,3}\s*\d+(?:\.\d+)*$/.test(dep.constraint.trim());
 }
 
 function stderrWarning(message: string): void {
@@ -126,7 +130,7 @@ export async function annotateWithAdvisories(
   const eligible: Array<{ finding: Finding; query: OsvQuery }> = [];
   for (const finding of findings) {
     const dep = dependencyOf(finding, deps);
-    if (!dep || !isPinned(dep.version)) continue;
+    if (!dep || !isPinned(dep)) continue;
     const ecosystem = ECOSYSTEM_TO_OSV[dep.ecosystem];
     if (!ecosystem) continue;
     eligible.push({ finding, query: { package: { name: dep.name, ecosystem }, version: dep.version } });

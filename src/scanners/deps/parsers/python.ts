@@ -49,11 +49,20 @@ function versionAfterOperator(spec: string): string {
   return spec.slice(opMatch.index + opMatch[0].length).trim();
 }
 
-function splitNameVersion(spec: string): { name: string; version: string } | null {
+/**
+ * Cut per-requirement options (`--hash=sha256:...`, `--config-settings ...`)
+ * off a requirements line: they start at the first ` --`.
+ */
+function stripOptions(spec: string): string {
+  const option = spec.search(/\s--/);
+  return option < 0 ? spec : spec.slice(0, option);
+}
+
+function splitNameVersion(spec: string): { name: string; version: string; constraint: string } | null {
   const trimmed = spec.trim();
   if (!trimmed || trimmed.startsWith("#")) return null;
   // Strip line comments after the spec (`pkg==1.0  # comment`).
-  const noComment = stripComment(trimmed).trim();
+  const noComment = stripOptions(stripComment(trimmed)).trim();
   if (!noComment) return null;
   // Strip extras: `pkg[extra1,extra2]==1.0`.
   const noExtras = stripExtras(noComment);
@@ -65,7 +74,7 @@ function splitNameVersion(spec: string): { name: string; version: string } | nul
   if (!nameMatch) return null;
   const name = normalizePythonName(nameMatch[1] ?? "");
   const rest = noMarker.slice(nameMatch[0].length).trim();
-  return { name, version: rest ? versionAfterOperator(rest) : "" };
+  return { name, version: rest ? versionAfterOperator(rest) : "", constraint: rest };
 }
 
 /** Collects dependencies, one per normalised name (first occurrence wins). */
@@ -75,27 +84,53 @@ class DepList {
 
   constructor(private readonly manifestPath: string) {}
 
-  add(name: string, version: string): void {
+  add(name: string, version: string, constraint?: string): void {
     const normalized = normalizePythonName(name);
     if (!normalized || this.seen.has(normalized)) return;
     this.seen.add(normalized);
-    this.deps.push({ name: normalized, version, ecosystem: "python", manifestPath: this.manifestPath });
+    this.deps.push({
+      name: normalized,
+      version,
+      ecosystem: "python",
+      manifestPath: this.manifestPath,
+      ...(constraint && constraint !== version ? { constraint } : {}),
+    });
   }
 
   addSpec(spec: string): void {
     const split = splitNameVersion(spec);
-    if (split) this.add(split.name, split.version);
+    if (split) this.add(split.name, split.version, split.constraint);
   }
 }
 
 /**
- * Parse a `requirements.txt`-style file (one PEP 508 spec per line). Options
- * (`-r`, `-e`, `--hash`) are skipped.
+ * Join pip's backslash line continuations, so `paramiko==3.4.0 \` followed
+ * by `--hash=...` lines is one requirement, not a version ending in `\`.
+ */
+function logicalLines(content: string): string[] {
+  const lines: string[] = [];
+  let pending = "";
+  for (const raw of content.split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    if (line.endsWith("\\")) {
+      pending += `${line.slice(0, -1)} `;
+      continue;
+    }
+    lines.push(pending + line);
+    pending = "";
+  }
+  if (pending) lines.push(pending);
+  return lines;
+}
+
+/**
+ * Parse a `requirements.txt`-style file (one PEP 508 spec per logical line).
+ * Options (`-r`, `-e`, `--hash`) are skipped.
  */
 export function parseRequirementsTxt(content: string, manifestPath: string): ParsedDep[] {
   const list = new DepList(manifestPath);
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
+  for (const logical of logicalLines(content)) {
+    const line = logical.trim();
     if (!line || line.startsWith("#") || line.startsWith("-")) continue;
     list.addSpec(line);
   }
@@ -166,9 +201,13 @@ export function parsePythonLock(content: string, manifestPath: string): ParsedDe
 export function parsePipfile(content: string, manifestPath: string): ParsedDep[] {
   const doc = parseToml(content);
   const list = new DepList(manifestPath);
-  const pipVersion = (value: TomlValue): string => versionAfterOperator(tableVersion(value)) || tableVersion(value);
-  addTableDeps(list, tableOf(doc.packages), pipVersion);
-  addTableDeps(list, tableOf(doc["dev-packages"]), pipVersion);
+  for (const section of [doc.packages, doc["dev-packages"]]) {
+    for (const [name, value] of Object.entries(tableOf(section) ?? {})) {
+      if (value === undefined || name.toLowerCase() === "python") continue;
+      const declared = tableVersion(value);
+      list.add(name, versionAfterOperator(declared) || declared, declared);
+    }
+  }
   return list.deps;
 }
 
@@ -187,7 +226,7 @@ export function parsePipfileLock(content: string, manifestPath: string): ParsedD
     if (packages === null || typeof packages !== "object") continue;
     for (const [name, entry] of Object.entries(packages as Record<string, unknown>)) {
       const version = entry !== null && typeof entry === "object" ? (entry as Record<string, unknown>).version : undefined;
-      list.add(name, typeof version === "string" ? versionAfterOperator(version) || version : "");
+      list.add(name, typeof version === "string" ? versionAfterOperator(version) || version : "", typeof version === "string" ? version : undefined);
     }
   }
   return list.deps;

@@ -227,15 +227,17 @@ export const REGISTRY: readonly RegistryEntry[] = [
   {
     name: "cryptography",
     ecosystem: "python",
+    // Below 48.0.0 the standard wheels carry no post-quantum primitive, so the
+    // base verdict is classical; at or above it the finding becomes transitional.
     fixedIn: "48.0.0",
-    severity: "info",
-    pq_status: "transitional",
+    severity: "medium",
+    pq_status: "vulnerable",
     usage: ["encryption", "key-establishment", "signature"],
     algorithms: ["RSA", "ECDSA", "ECDH", "Ed25519", "X25519"],
     reason:
-      "Canonical high-level crypto library. ML-KEM and ML-DSA arrived in 47.0.0 for AWS-LC/BoringSSL builds and in 48.0.0 for OpenSSL 3.5+, which puts them in the standard wheels; its RSA/ECC APIs remain classical.",
+      "Canonical high-level crypto library. ML-KEM and ML-DSA arrived in 47.0.0 for AWS-LC/BoringSSL builds and in 48.0.0 for OpenSSL 3.5+, which puts them in the standard wheels; earlier releases offer only classical public-key algorithms, and its RSA/ECC APIs remain classical at every version.",
     recommendation:
-      "Stay on >= 48.0.0 and move key establishment to ML-KEM (or a hybrid) and signatures to ML-DSA where the protocol allows.",
+      "Upgrade to >= 48.0.0 (ML-KEM and ML-DSA in the standard wheels), then move key establishment to ML-KEM (or a hybrid) and signatures to ML-DSA where the protocol allows.",
     references: [REFS.fips203, REFS.fips204],
   },
   {
