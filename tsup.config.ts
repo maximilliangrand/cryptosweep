@@ -1,12 +1,9 @@
 import { defineConfig } from "tsup";
+import type { Options } from "tsup";
 
-export default defineConfig({
-  entry: ["src/cli.ts", "src/index.ts", "src/mcp.ts"],
-  format: ["esm", "cjs"],
-  target: "node20",
+const shared: Options = {
+  target: "node22",
   platform: "node",
-  clean: true,
-  dts: { entry: "src/index.ts" },
   sourcemap: true,
   splitting: false,
   shims: false,
@@ -14,4 +11,24 @@ export default defineConfig({
   // scanner's parser). Minify to bound the vendored size; do NOT add it to
   // `external`, or the AST scanner would break at runtime.
   minify: true,
-});
+};
+
+// The two builds run concurrently and share dist/, so each one's clean step
+// keeps the other's outputs (tsup always removes everything else first).
+export default defineConfig([
+  {
+    ...shared,
+    // The bins are executed, never require()d, so they ship as ESM only. A CJS
+    // build of an entry that reads import.meta.url cannot run at all.
+    entry: ["src/cli.ts", "src/mcp.ts"],
+    format: ["esm"],
+    clean: ["!index.*"],
+  },
+  {
+    ...shared,
+    entry: ["src/index.ts"],
+    format: ["esm", "cjs"],
+    dts: { entry: "src/index.ts" },
+    clean: ["!cli.*", "!mcp.*"],
+  },
+]);

@@ -1,11 +1,16 @@
 {
   "name": "cryptosweep",
-  "version": "0.1.0",
-  "description": "Post-quantum crypto migration scanner — TLS posture and source-code crypto detection.",
+  "version": "0.2.0",
+  "description": "Inventory the cryptography in TLS endpoints, source code and dependency manifests, and plan a post-quantum migration.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maximilliangrand/cryptosweep.git"
+  },
+  "homepage": "https://github.com/maximilliangrand/cryptosweep#readme",
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.20"
   },
   "bin": {
     "cryptosweep": "./dist/cli.js",
@@ -21,7 +26,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.map"
   ],
   "scripts": {
     "dev": "tsup --watch",
@@ -30,7 +36,7 @@
     "build": "tsup",
     "test": "vitest run",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p viewer",
     "format": "prettier --write ."
   },
   "dependencies": {

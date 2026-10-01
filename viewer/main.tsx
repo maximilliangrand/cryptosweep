@@ -24,60 +24,9 @@ import {
 } from "@blueprintjs/core";
 import "@blueprintjs/core/lib/css/blueprint.css";
 import "./styles.css";
-
-type Severity = "critical" | "high" | "medium" | "low" | "info";
-
-interface Reference {
-  label: string;
-  url?: string;
-}
-interface Finding {
-  id: string;
-  ruleId?: string;
-  severity: Severity;
-  category: string;
-  title: string;
-  evidence: string;
-  location?: { path?: string; line?: number; host?: string; port?: number };
-  pq_status: string;
-  confidence?: string;
-  algorithm?: string;
-  recommendation: string;
-  references?: Reference[];
-}
-interface Report {
-  target: string;
-  scanned_at: string;
-  summary: Record<Severity | "findings", number>;
-  findings: Finding[];
-}
-interface MoscaVerdict {
-  threat: string;
-  status: string;
-  horizonYears: number;
-  migrationYears: number;
-  crqcYear: number;
-  mustStartInYears: number;
-  rationale: string;
-}
-interface RiskAsset {
-  key: string;
-  label: string;
-  pq_status: string;
-  verdict: MoscaVerdict;
-}
-interface RiskModel {
-  assumptions: { crqcYear: number; crqcBasis: string; dataClass: string; horizonYears: number };
-  assets: RiskAsset[];
-  ledger: {
-    exposedAssets: number;
-    overdueAssets: number;
-    actNowAssets: number;
-    onTrackAssets: number;
-    exposureRiskYears: number;
-    headline: string;
-  };
-}
+// The report and risk-model shapes come from the scanner itself (type-only, erased from the bundle).
+import type { CoverageEntry, Finding, Report, Severity } from "../src/report";
+import type { RiskModel } from "../src/model/risk";
 
 const SEVERITIES: Severity[] = ["critical", "high", "medium", "low", "info"];
 const PQ_STATUSES = ["vulnerable", "transitional", "safe", "unknown"];
@@ -165,6 +114,23 @@ function RiskBanner({ risk }: { risk: RiskModel }): JSX.Element {
         </div>
       ) : null}
     </section>
+  );
+}
+
+/** What each check examined, so a short or empty findings list is never read as a clean bill of health. */
+function CoverageCallout({ coverage }: { coverage: CoverageEntry[] }): JSX.Element {
+  const partial = coverage.some((entry) => !entry.complete);
+  return (
+    <Callout className="csw-coverage" intent={partial ? Intent.WARNING : Intent.NONE} title={partial ? "Coverage (partial)" : "Coverage"}>
+      <ul>
+        {coverage.map((entry) => (
+          <li key={entry.check}>
+            <strong>{entry.check}</strong>: {entry.scope}{" "}
+            <span className={Classes.TEXT_MUTED}>{entry.complete ? "(complete)" : `(partial${entry.note ? `: ${entry.note}` : ""})`}</span>
+          </li>
+        ))}
+      </ul>
+    </Callout>
   );
 }
 
@@ -285,6 +251,7 @@ function App(): JSX.Element {
       </Navbar>
 
       {risk ? <RiskBanner risk={risk} /> : null}
+      {report.coverage?.length ? <CoverageCallout coverage={report.coverage} /> : null}
 
       <div className="csw-tiles">
         <Tile n={report.summary?.critical} label="Critical" kind="critical" />

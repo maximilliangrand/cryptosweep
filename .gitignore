@@ -141,9 +141,3 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
-
-# Cloudflare Workers / wrangler
-web/.dev.vars
-web/.wrangler/
-web/dist/
-

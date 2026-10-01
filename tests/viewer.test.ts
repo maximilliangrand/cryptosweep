@@ -38,6 +38,14 @@ describe("toHtml", () => {
     expect(html).toContain("RSA-2048");
   });
 
+  it("ships a viewer that shows the report's recorded coverage", () => {
+    const coverage = [{ check: "source", scope: "source files", complete: false, note: "2 binary files skipped" }];
+    const html = toHtml(buildReport("repo", [], AT, coverage));
+    expect(html).toContain('"note":"2 binary files skipped"');
+    // The bundled viewer (decoded from the committed shell) renders the coverage callout.
+    expect(html).toContain("Coverage (partial)");
+  });
+
   it("neutralizes a </script> breakout attempt in scanned evidence", () => {
     const findings: Finding[] = [
       {

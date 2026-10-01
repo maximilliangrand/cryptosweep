@@ -63,7 +63,9 @@ describe("scanSource (fixture directory)", () => {
 
   it("skips ignored directories like node_modules", async () => {
     const findings = await scanSource(root);
-    expect(findings.every((f) => !f.evidence.includes("node_modules"))).toBe(true);
+    expect(findings.every((f) => !f.location?.path?.includes("node_modules"))).toBe(true);
+    // The skip itself is recorded, so the inventory says what it left out.
+    expect(findings.find((f) => f.ruleId === "source/directories-skipped")?.evidence).toBe("node_modules");
   });
 
   it("emits an explicit truncation finding when the file budget is exhausted", async () => {

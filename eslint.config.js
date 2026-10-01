@@ -7,7 +7,6 @@ export default tseslint.config(
       "dist/**",
       "coverage/**",
       "node_modules/**",
-      "web/**",
       "viewer/**",
       "scripts/**",
       "src/output/viewer-shell.ts",

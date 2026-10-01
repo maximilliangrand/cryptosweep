@@ -9,32 +9,39 @@ guiding principle, and most review feedback traces back to it:
 
 ## Getting set up
 
-Requires Node >= 20 and pnpm.
+Requires Node >= 22.20 and pnpm. The post-quantum key-exchange probe and its
+live tests also need the runtime's OpenSSL to be 3.5 or later (check
+`node -p process.versions.openssl`; Node 22.0 to 22.19 ship OpenSSL 3.0); on an
+older OpenSSL those tests skip with a stated reason.
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 pnpm build
 ```
 
-Four gates must pass before anything merges. Run them locally:
+Four gates must pass before anything merges. CI (`.github/workflows/ci.yml`)
+runs them on Node 22 and 26, and also fails if the build leaves the tree
+different from what was committed. Run them locally:
 
 ```bash
-pnpm typecheck   # tsc --noEmit, strict
+pnpm typecheck   # tsc --noEmit, strict, for src/, tests/ and viewer/
 pnpm lint        # eslint
-pnpm test        # vitest, offline (no network in unit tests)
-pnpm build       # tsup
+pnpm test        # vitest; no internet access (live TLS tests use loopback servers)
+pnpm build       # regenerates src/output/viewer-shell.ts, then tsup
 ```
 
-The Cloudflare Worker in `web/` has its own package and its own gates:
-
-```bash
-cd web && pnpm install && pnpm typecheck && pnpm test
-```
+If you change `viewer/`, commit the regenerated `src/output/viewer-shell.ts`; the
+bundle is reproducible from the lockfile, so CI can check it.
 
 ## Where things live
 
 - `src/asn1.ts`, `src/crypto.ts`: the parsing and classification core. Changes here
   need real-input tests (see `tests/fixtures/certs/`, generated with OpenSSL).
+- `src/algorithms.ts`: the algorithm-label vocabulary the CBOM and the risk engine
+  share. A scanner that emits a new label needs a row here;
+  `tests/algorithm-vocabulary.test.ts` fails until it has one.
+- `src/scanners/walk-policy.ts`: what both directory walkers skip, and which
+  paths count as documentation, tests, fixtures or examples.
 - `src/scanners/`: the TLS, source, and dependency scanners.
 - `src/output/`: JSON, Markdown, CBOM, SARIF, and HTML projections of one `Finding`
   model. New output formats go here and read only from that model.
@@ -70,6 +77,8 @@ Every entry must:
 
 ## Reporting a security issue
 
-The scanner ingests untrusted input (arbitrary hosts, repositories, and public
-POSTs). If you find a way to make it reach an internal address, execute code, or
-exhaust resources, please open a private report rather than a public issue.
+The scanner ingests untrusted input (arbitrary hosts, repositories, and, through
+the MCP server, tool arguments written by a model). If you find a way to make it
+reach an internal address, read outside the MCP root, execute code, or exhaust
+resources, do not open a public issue with the details: [SECURITY.md](SECURITY.md)
+says what counts and how to reach the maintainer privately.

@@ -1,8 +1,10 @@
 /**
  * Opt-in OSV.dev advisory enrichment for flagged dependencies.
  *
- * This is the only network path in cryptosweep and it is OFF by default (behind
- * `--advisories`). It adds a *distinct* dimension to a dependency finding, known
+ * This is the only network call the dependency scanner makes, and it is OFF by
+ * default (behind `--advisories`; on the MCP server, the operator's
+ * CRYPTOSWEEP_MCP_ADVISORIES). TLS scans and GitHub clones are network
+ * operations by nature and go through the SSRF guard instead. It adds a *distinct* dimension to a dependency finding, known
  * CVE advisories, without ever changing the post-quantum verdict: it only
  * appends references and one recommendation line. It queries OSV.dev only for
  * dependencies that are BOTH already flagged by the registry AND concretely
@@ -11,6 +13,7 @@
  * Every failure is fail-closed: the original findings are returned unchanged.
  */
 import type { Finding, Reference } from "../../report";
+import { entryForRuleId } from "./registry";
 import type { Ecosystem } from "./registry";
 import type { ParsedDep } from "./parsers/npm";
 
@@ -30,6 +33,8 @@ export interface AdvisoryOptions {
   /** Overridable in tests; defaults to the OSV endpoint constant. */
   endpoint?: string;
   timeoutMs?: number;
+  /** Where lookup failures are reported; defaults to stderr. MCP and library callers can capture them. */
+  onWarning?: (message: string) => void;
 }
 
 /** cryptosweep ecosystem -> OSV ecosystem name. Anything unmapped is skipped. */
@@ -47,19 +52,24 @@ interface OsvResult {
   vulns?: Array<{ id?: string }>;
 }
 
-/** A concretely-pinned version has no open-range operator and is purely numeric. */
-function isPinned(version: string | undefined): version is string {
-  const v = (version ?? "").trim();
-  return /^\d+(?:\.\d+)*$/.test(v);
+/**
+ * A concretely-pinned dependency: a purely numeric version, and no wider
+ * constraint behind it. A Python `>=41` keeps only `41` as its version, and a
+ * Cargo `0.23.27` is a caret range; neither names the installed release.
+ */
+function isPinned(dep: ParsedDep): boolean {
+  if (!/^\d+(?:\.\d+)*$/.test(dep.version.trim())) return false;
+  return dep.constraint === undefined || /^={2,3}\s*\d+(?:\.\d+)*$/.test(dep.constraint.trim());
 }
 
-function warn(message: string): void {
+function stderrWarning(message: string): void {
   process.stderr.write(`cryptosweep: ${message}\n`);
 }
 
 /** One OSV batch POST. Fail-closed: returns [] and warns once on any problem. */
 async function queryOsvBatch(queries: OsvQuery[], opts: AdvisoryOptions): Promise<OsvResult[]> {
   if (queries.length === 0) return [];
+  const warn = opts.onWarning ?? stderrWarning;
   const doFetch = opts.fetchImpl ?? (fetch as unknown as FetchLike);
   try {
     const res = await doFetch(opts.endpoint ?? OSV_ENDPOINT, {
@@ -81,6 +91,33 @@ async function queryOsvBatch(queries: OsvQuery[], opts: AdvisoryOptions): Promis
 }
 
 /**
+ * The parsed dependency a finding is about, joined on structured identity:
+ * ecosystem and name (from `Finding.dependency`, or the registry entry its rule
+ * id names) plus the manifest path, and the declared version when the finding
+ * carries one. Rebuilding the evidence string to look a dependency up tied this
+ * module to another module's display format. When the finding carries no
+ * version and one manifest lists the package twice, the join is ambiguous and
+ * the finding is skipped, which fails closed.
+ */
+function dependencyOf(finding: Finding, deps: readonly ParsedDep[]): ParsedDep | undefined {
+  if (finding.category !== "deps") return undefined;
+  const entry = entryForRuleId(finding.ruleId);
+  const ecosystem = finding.dependency?.ecosystem ?? entry?.ecosystem;
+  const name = finding.dependency?.name ?? entry?.name;
+  if (!ecosystem || !name) return undefined;
+  const manifestPath = finding.location?.path;
+  const candidates = deps.filter(
+    (dep) =>
+      dep.ecosystem === ecosystem &&
+      dep.name === name &&
+      (manifestPath === undefined || dep.manifestPath === manifestPath) &&
+      (finding.dependency?.version === undefined || dep.version === finding.dependency.version),
+  );
+  const versions = new Set(candidates.map((dep) => dep.version));
+  return versions.size === 1 ? candidates[0] : undefined;
+}
+
+/**
  * Append known-advisory references to already-flagged, pinned dependencies.
  * Pure with respect to the PQ verdict: severity, pq_status, confidence, and
  * title are never touched.
@@ -90,13 +127,10 @@ export async function annotateWithAdvisories(
   deps: readonly ParsedDep[],
   opts: AdvisoryOptions,
 ): Promise<Finding[]> {
-  const byEvidence = new Map<string, ParsedDep>();
-  for (const dep of deps) byEvidence.set(`${dep.manifestPath}:${dep.name}@${dep.version || "*"}`, dep);
-
   const eligible: Array<{ finding: Finding; query: OsvQuery }> = [];
   for (const finding of findings) {
-    const dep = byEvidence.get(finding.evidence);
-    if (!dep || !isPinned(dep.version)) continue;
+    const dep = dependencyOf(finding, deps);
+    if (!dep || !isPinned(dep)) continue;
     const ecosystem = ECOSYSTEM_TO_OSV[dep.ecosystem];
     if (!ecosystem) continue;
     eligible.push({ finding, query: { package: { name: dep.name, ecosystem }, version: dep.version } });

@@ -1,71 +1,72 @@
 /**
- * Cargo (Rust) dependency parser.
+ * Cargo (Rust) dependency parsers.
  *
- * Reads `[dependencies]`, `[dev-dependencies]`, and `[build-dependencies]`
- * tables from a `Cargo.toml`. Supports both the short form (`name = "1.0"`)
- * and the inline-table form (`name = { version = "1.0", features = [...] }`).
- * Pure / no I/O.
+ * `Cargo.toml`: `[dependencies]`, `[dev-dependencies]` and `[build-dependencies]`
+ * in every form Cargo accepts (`name = "1.0"`, inline tables, dotted
+ * `[dependencies.name]` tables), target-specific tables
+ * (`[target.'cfg(unix)'.dependencies]`), `[workspace.dependencies]`, renamed
+ * crates (`alias = { package = "ring", ... }`) and `name = { workspace = true }`
+ * inheritance. `Cargo.lock`: every resolved `[[package]]`, direct and
+ * transitive. Pure / no I/O.
  */
 import type { ParsedDep } from "./npm";
+import { arrayOf, parseToml, stringOf, tableOf } from "./toml";
+import type { TomlTable, TomlValue } from "./toml";
 
 const DEP_TABLES = ["dependencies", "dev-dependencies", "build-dependencies"] as const;
 
-function findTableBlocks(content: string, tableName: string): string[] {
-  const blocks: string[] = [];
-  const headerRe = new RegExp(`^\\[${escapeRegex(tableName)}\\]\\s*$`, "gm");
-  let m: RegExpExecArray | null;
-  while ((m = headerRe.exec(content)) !== null) {
-    const afterHeader = content.slice(m.index + m[0].length);
-    const nextTable = afterHeader.search(/^\[[^\]]+\]\s*$/m);
-    blocks.push(nextTable < 0 ? afterHeader : afterHeader.slice(0, nextTable));
-  }
-  return blocks;
+function versionOf(value: TomlValue | undefined): string {
+  if (typeof value === "string") return value;
+  return stringOf(tableOf(value)?.version) ?? "";
 }
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function extractInlineTableVersion(value: string): string {
-  // value is like `{ version = "1.0", features = ["..."] }`, possibly without `version` key.
-  const versionMatch = /\bversion\s*=\s*["']([^"']+)["']/.exec(value);
-  return versionMatch?.[1] ?? "";
-}
-
-function parseDepLine(line: string): { name: string; version: string } | null {
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.startsWith("#")) return null;
-  const eq = trimmed.indexOf("=");
-  if (eq < 0) return null;
-  const rawName = trimmed.slice(0, eq).trim();
-  // Strip surrounding quotes if any (rare but legal).
-  const name = rawName.replace(/^["']|["']$/g, "");
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name)) return null;
-  const valueRaw = trimmed.slice(eq + 1).trim();
-  const stringMatch = /^["']([^"']+)["']/.exec(valueRaw);
-  if (stringMatch?.[1]) return { name, version: stringMatch[1] };
-  if (valueRaw.startsWith("{")) return { name, version: extractInlineTableVersion(valueRaw) };
-  return { name, version: "" };
-}
-
-/** Parse a `Cargo.toml`. Returns one entry per direct dep across the supported tables. */
+/** Parse a `Cargo.toml`. Returns one entry per declared crate across every dependency table. */
 export function parseCargoToml(content: string, manifestPath: string): ParsedDep[] {
+  const doc = parseToml(content);
+  const workspace = tableOf(tableOf(doc.workspace)?.dependencies);
+  const tables: TomlTable[] = [];
+  for (const key of DEP_TABLES) {
+    const table = tableOf(doc[key]);
+    if (table) tables.push(table);
+  }
+  if (workspace) tables.push(workspace);
+  for (const target of Object.values(tableOf(doc.target) ?? {})) {
+    for (const key of DEP_TABLES) {
+      const table = tableOf(tableOf(target)?.[key]);
+      if (table) tables.push(table);
+    }
+  }
+
   const seen = new Set<string>();
   const deps: ParsedDep[] = [];
-  for (const table of DEP_TABLES) {
-    for (const block of findTableBlocks(content, table)) {
-      for (const rawLine of block.split(/\r?\n/)) {
-        const parsed = parseDepLine(rawLine);
-        if (!parsed || seen.has(parsed.name)) continue;
-        seen.add(parsed.name);
-        deps.push({
-          name: parsed.name,
-          version: parsed.version,
-          ecosystem: "cargo",
-          manifestPath,
-        });
-      }
+  for (const table of tables) {
+    for (const [alias, value] of Object.entries(table)) {
+      if (value === undefined) continue;
+      const spec = tableOf(value);
+      const name = stringOf(spec?.package) ?? alias;
+      let version = versionOf(value);
+      if (!version && spec?.workspace === true) version = versionOf(workspace?.[name] ?? workspace?.[alias]);
+      if (seen.has(name)) continue;
+      seen.add(name);
+      // A bare Cargo.toml requirement is a caret requirement (`0.23` means `^0.23`).
+      const constraint = /^\d/.test(version) ? `^${version}` : undefined;
+      deps.push({ name, version, ecosystem: "cargo", manifestPath, ...(constraint ? { constraint } : {}) });
     }
+  }
+  return deps;
+}
+
+/** Parse a `Cargo.lock`: one entry per resolved `name@version`. */
+export function parseCargoLock(content: string, manifestPath: string): ParsedDep[] {
+  const seen = new Set<string>();
+  const deps: ParsedDep[] = [];
+  for (const entry of arrayOf(parseToml(content).package)) {
+    const pkg = tableOf(entry);
+    const name = stringOf(pkg?.name);
+    const version = stringOf(pkg?.version) ?? "";
+    if (!name || seen.has(`${name}@${version}`)) continue;
+    seen.add(`${name}@${version}`);
+    deps.push({ name, version, ecosystem: "cargo", manifestPath });
   }
   return deps;
 }
