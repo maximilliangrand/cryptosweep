@@ -56,7 +56,10 @@ export interface CryptoAsset {
   key: string;
   label: string;
   category: string;
-  /** The rule every finding of this asset shares. */
+  /**
+   * The rule every finding of this asset shares; for a TLS endpoint's
+   * key-establishment asset, which gathers several rules, the key-exchange rule.
+   */
   ruleId: string;
   /** What the asset is used for, as far as the evidence shows; empty when undetermined. */
   usage: CryptoUsage[];
@@ -387,12 +390,26 @@ function worstVerdict(assessment: ThreatAssessment, category: string, profile: E
   };
 }
 
+/** The rule that names a TLS endpoint's key exchange, and so its key-establishment asset. */
+const TLS_KEY_EXCHANGE_RULE = "tls/hybrid-kex";
+
 /**
  * Group findings into distinct cryptographic assets: one per rule and
  * algorithm, so a committed private key and an embedded public key, or an MD5
  * hash and an RC4 cipher, never share an asset.
+ *
+ * The exception is a TLS endpoint's key establishment. Its harvest-now
+ * findings (the key exchange, a TLS 1.2 protocol that cannot carry ML-KEM, a
+ * leaf key that decrypts the premaster secret under static RSA) describe one
+ * exposure, so they are one asset per endpoint: counted separately, one
+ * static-RSA server was three exposed assets and three times the risk-years.
  */
-function assetKey(f: Finding & { ruleId: string }): string {
+function assetKey(f: Finding & { ruleId: string }, assessment: ThreatAssessment): string {
+  const host = f.category === "tls" ? f.location?.host : undefined;
+  if (host && assessment.threats.includes("harvest-now")) {
+    const authority = host.includes(":") ? `[${host}]` : host;
+    return `tls/key-establishment@${authority}:${f.location?.port ?? 443}`;
+  }
   return f.algorithm ? `${f.ruleId}:${f.algorithm}` : f.ruleId;
 }
 
@@ -450,7 +467,7 @@ export function assessRisk(target: string, findings: Finding[], profile: EstateP
     const f = normalizeFinding(raw);
     const assessment = assessThreat(f);
     const v = worstVerdict(assessment, f.category, profile);
-    const key = assetKey(f);
+    const key = assetKey(f, assessment);
     // Documentation, tests, fixtures and examples are inventoried apart, so a
     // README table or a fixture key never stands in for the estate's exposure.
     const drafts = f.location?.context ? nonProduction : production;
@@ -474,6 +491,11 @@ export function assessRisk(target: string, findings: Finding[], profile: EstateP
     }
     const a = existing.asset;
     a.findingIds.push(f.id);
+    if (f.ruleId === TLS_KEY_EXCHANGE_RULE && a.ruleId !== TLS_KEY_EXCHANGE_RULE) {
+      // An endpoint's key-establishment asset is named after its key exchange, whichever finding came first.
+      a.ruleId = f.ruleId;
+      a.label = assetLabel(f, assessment.usage);
+    }
     const cnsa2 = combineCnsa2(a.cnsa2, cnsa2Of(f, assessment.usage));
     if (cnsa2 !== undefined) a.cnsa2 = cnsa2;
     for (const u of assessment.usage) if (!a.usage.includes(u)) a.usage.push(u);
