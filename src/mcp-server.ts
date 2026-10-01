@@ -29,14 +29,14 @@
  * that come from the scanned target are stripped of control characters before
  * they reach the model.
  */
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, parse, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { NO_FINDINGS_MESSAGE, buildReport, coverageLines, emptyResultNote } from "./report";
 import type { Report } from "./report";
-import { classifyTarget, describeCoverage, parseCrqcYear, parseMigrationYears, scanTarget } from "./orchestrate";
+import { classifyTarget, describeCoverage, isFilesystemLike, parseCrqcYear, parseMigrationYears, scanTarget } from "./orchestrate";
 import type { Target } from "./orchestrate";
 import { assessRisk } from "./model/risk";
 import type { RiskModel } from "./model/risk";
@@ -191,11 +191,18 @@ export function loadConfig(
   };
 }
 
+/** True when `path` is lexically inside the scan root as resolved or as configured. */
+function withinRoot(path: string, config: ServerConfig): boolean {
+  if (!config.root) return false;
+  return [config.root, config.rootAlias ?? config.root].some((root) => isWithin(path, root));
+}
+
 /**
  * Confine a directory target to the scan root and return its real path, which
  * is what gets scanned. The lexical check comes first, so nothing outside the
- * root is ever touched; the real-path check then catches a symlink inside the
- * root that points out of it.
+ * root is ever touched, and every path outside it gets the same answer whether
+ * or not it exists; the real-path check then catches a symlink inside the root
+ * that points out of it. A `~` is not expanded: the home directory is outside.
  */
 function confineToRoot(target: string, dir: string, config: ServerConfig): string {
   if (!config.root) {
@@ -206,9 +213,9 @@ function confineToRoot(target: string, dir: string, config: ServerConfig): strin
   const outside = new Error(
     `Refusing to scan ${target}: filesystem targets must be inside ${config.root}. Set CRYPTOSWEEP_MCP_ROOT to widen the scope.`,
   );
+  if (/^~(?:[/\\]|$)/.test(dir)) throw outside;
   const lexical = resolve(config.root, dir);
-  const aliases = [config.root, config.rootAlias ?? config.root];
-  if (!aliases.some((root) => isWithin(lexical, root))) throw outside;
+  if (!withinRoot(lexical, config)) throw outside;
   let real: string;
   try {
     real = realpathSync(lexical);
@@ -216,12 +223,23 @@ function confineToRoot(target: string, dir: string, config: ServerConfig): strin
     throw new Error(`No such directory: ${target}`);
   }
   if (!isWithin(real, config.root)) throw outside;
+  if (!statSync(real).isDirectory()) throw new Error(`${target} is a file; pass the directory that contains it`);
   return real;
 }
 
-/** Classify a target for the MCP path, confining filesystem targets to the root. */
-function mcpTarget(target: string, config: ServerConfig): Target {
-  const parsed = classifyTarget(target, { baseDir: config.root ?? process.cwd() });
+/**
+ * Classify a target for the MCP path, confining filesystem targets to the
+ * root. Anything shaped like a path is confined before it is classified, so a
+ * model can neither probe for files outside the root nor turn `a/../b` into a
+ * DNS lookup for `a`; classification itself only stats inside the root.
+ */
+export function mcpTarget(target: string, config: ServerConfig): Target {
+  const input = target.trim();
+  if (isFilesystemLike(input)) return { kind: "path", dir: confineToRoot(target, input, config) };
+  const parsed = classifyTarget(input, {
+    baseDir: config.root ?? process.cwd(),
+    mayStat: (dir) => withinRoot(dir, config),
+  });
   if (parsed.kind !== "path") return parsed;
   return { kind: "path", dir: confineToRoot(target, parsed.dir, config) };
 }

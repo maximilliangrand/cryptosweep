@@ -36,6 +36,13 @@ export interface ScanTargetOptions {
 export interface ClassifyOptions {
   /** Resolve relative filesystem targets against this directory instead of the working directory. */
   baseDir?: string;
+  /**
+   * Whether classification may stat this candidate directory. A caller that
+   * confines filesystem targets (the MCP server) refuses paths outside its
+   * root, so that an "is a file" or "not found" answer cannot reveal whether
+   * something exists there; a refused candidate is classified as absent.
+   */
+  mayStat?: (dir: string) => boolean;
 }
 
 /** `./x`, `../x`, `/x`, `~`, `~/x`, `C:\x`: input that can only mean a filesystem path. */
@@ -144,7 +151,7 @@ export function classifyTarget(target: string, options: ClassifyOptions = {}): T
   const dir = options.baseDir === undefined ? expanded : resolve(options.baseDir, expanded);
 
   if (PATH_LIKE.test(input)) return { kind: "path", dir };
-  const existing = statKind(dir);
+  const existing = options.mayStat?.(dir) === false ? null : statKind(dir);
   if (existing === "dir") return { kind: "path", dir };
   if (existing === "file") throw new Error(`${input} is a file; pass the directory that contains it`);
 
@@ -166,6 +173,19 @@ export function classifyTarget(target: string, options: ClassifyOptions = {}): T
   if (!bare) throw new Error(`Not a hostname, URL, GitHub repository or directory: ${input}`);
   const [, host = "", port] = bare;
   return hostTarget(canonicalHost(host, input), port, input);
+}
+
+/**
+ * True when `input` can only be a filesystem path once URLs and git remotes
+ * are ruled out: a path prefix (`./`, `/`, `~`, `C:\`), a backslash, a `..`
+ * segment, or a `/` that does not make a GitHub `owner/repo`. The MCP server
+ * confines such input lexically before anything touches the disk or the
+ * network, where {@link classifyTarget} would read `a/../b` as the host `a`.
+ */
+export function isFilesystemLike(input: string): boolean {
+  if (SCHEME.test(input) || SCP_REMOTE.test(input)) return false;
+  if (PATH_LIKE.test(input) || input.includes("\\") || /(?:^|\/)\.\.(?:\/|$)/.test(input)) return true;
+  return input.includes("/") && parseGitHubRepo(input) === null;
 }
 
 /** Scan a local directory: source + dependency manifests, then reconcile the two. */
