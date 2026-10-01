@@ -33,7 +33,7 @@ export interface ClonedRepo {
 export interface CloneOptions {
   /** Permit https remotes on other hosts and ssh remotes. Operator opt-in only. */
   allowAnyHost?: boolean;
-  /** Skip the SSRF check on the remote host (and with it, address pinning). */
+  /** Let the SSRF guard pass a non-public remote host; it is still resolved once and pinned. */
   allowPrivate?: boolean;
   /** Deadline for the whole clone, fetch and checkout together. */
   timeoutMs?: number;
@@ -413,7 +413,8 @@ export async function cloneRepository(
 
   // Vet the host before anything touches the disk or the network; the vetted
   // addresses are then pinned so git cannot resolve the name differently.
-  const pinned = options.allowPrivate ? [] : await resolveAllowedAddress(remote.host, false);
+  // allowPrivate lifts only the range check, never the resolve-once pinning.
+  const pinned = await resolveAllowedAddress(remote.host, options.allowPrivate === true);
   options.signal?.throwIfAborted();
 
   const work = await mkdtemp(join(tmpdir(), "cryptosweep-"));

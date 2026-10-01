@@ -353,6 +353,15 @@ describe.skipIf(!posix)("cloneRepository", () => {
     for (const c of calls()) expect(c.args).toContain("protocol.allow=never");
   });
 
+  it("still resolves once and pins the address when private addresses are allowed", async () => {
+    // allowPrivate used to skip resolution altogether, so git resolved the name itself, unpinned.
+    guard.resolveAllowedAddress.mockResolvedValue([{ address: "10.0.0.5", family: 4 }]);
+    const repo = await cloneRepository("https://git.internal.example/team/ok.git", { allowAnyHost: true, allowPrivate: true });
+    await repo.cleanup();
+    expect(guard.resolveAllowedAddress).toHaveBeenCalledWith("git.internal.example", true);
+    expect(cloneCall()?.args).toContain("http.curloptResolve=git.internal.example:443:10.0.0.5");
+  });
+
   it("vets the host before spawning git, and spawns nothing when the guard refuses", async () => {
     guard.resolveAllowedAddress.mockRejectedValue(
       new Error("Refusing to scan internal.corp: resolves to non-public address 10.0.0.5"),
