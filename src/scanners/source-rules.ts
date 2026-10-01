@@ -1300,9 +1300,20 @@ const JS_REGEX: readonly RegexMatcher[] = [
   {
     language: "javascript",
     gate: JWT_USAGE,
-    pattern: /["'`](HS256|HS384|HS512|RS256|RS384|RS512|ES256|ES384|ES512|PS256|PS384|PS512|EdDSA|none)["'`]/g,
+    pattern: /["'`](HS256|HS384|HS512|RS256|RS384|RS512|ES256|ES384|ES512|PS256|PS384|PS512|EdDSA)["'`]/g,
     classify: (m) => one(jwtSelection("jsonwebtoken", m[1] ?? "")),
     sample: 'jwt.sign(payload, key, { algorithm: "RS256" })',
+  },
+  {
+    // "none" is an ordinary string (`display = "none"`), so unlike the
+    // algorithm names above it only counts as an assignment to an `alg`,
+    // `algorithm` or `algorithms` key, within the same statement. A comparison
+    // (`alg === "none"`, how libraries reject it) does not match.
+    language: "javascript",
+    gate: JWT_USAGE,
+    pattern: /\b(?:alg|algorithms?)["'`]?\s{0,8}[:=][^\]\r\n;:=]{0,64}?["'`]none["'`]/g,
+    classify: () => one(jwtSelection("jsonwebtoken", "none")),
+    sample: 'jwt.verify(token, key, { algorithms: ["none"] })',
   },
 ];
 
