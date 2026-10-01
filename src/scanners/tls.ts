@@ -114,6 +114,13 @@ export interface TlsScanResult {
   authorizationError?: string | null;
   /** True when only a legacy client offer (TLS 1.0+, OpenSSL security level 0) completed. */
   legacyHandshake?: boolean;
+  /**
+   * Why no handshake completed, when the server refused every offer at the TLS
+   * layer while this runtime could not offer every post-quantum group: such a
+   * server may accept only ML-KEM, so the scan reports what it could not
+   * assess instead of aborting.
+   */
+  handshakeRefused?: string;
   chain: CertInfo[];
 }
 
@@ -1048,6 +1055,21 @@ export function analyzeTls(
   const findings: Finding[] = [];
   const leaf = result.chain[0];
 
+  if (result.handshakeRefused) {
+    findings.push({
+      id: "CSW-TLS-009",
+      ruleId: "tls/handshake-refused",
+      severity: "info",
+      category: "tls",
+      title: "The server refused every handshake this runtime could offer",
+      evidence: `${target} (${result.handshakeRefused})`,
+      pq_status: "unknown",
+      confidence: "low",
+      recommendation:
+        "A limit of the scanning machine, not a verdict on the server: it refused every classical group offered, so it may accept only post-quantum key exchange, which this runtime's OpenSSL cannot offer. The certificate chain, protocol and key exchange were not assessed. Re-run on a Node.js build whose OpenSSL is 3.5 or later (see process.versions.openssl).",
+    });
+  }
+
   if (!leaf) {
     findings.push({
       id: "CSW-TLS-000",
@@ -1321,8 +1343,17 @@ async function handshake(target: ResolvedTarget, port: number, timeoutMs: number
   } catch (err) {
     if (!isTlsLayerError(err)) throw err;
     const legacy = await readHandshake(target, port, timeoutMs, { ...modern, ...LEGACY_OFFER }).catch(() => null);
-    if (!legacy) throw err;
-    return { ...legacy, legacyHandshake: true };
+    if (legacy) return { ...legacy, legacyHandshake: true };
+    const missing = PQ_GROUPS.map((g) => g.name).filter((name) => !locallySupported(name));
+    if (missing.length === 0) throw err;
+    const openssl = process.versions.openssl ?? "(unknown version)";
+    return {
+      protocol: null,
+      cipherName: null,
+      groupName: null,
+      chain: [],
+      handshakeRefused: `${errorCode(err) ?? "handshake failure"}; local OpenSSL ${openssl} lacks ${missing.join(", ")}`,
+    };
   }
 }
 
