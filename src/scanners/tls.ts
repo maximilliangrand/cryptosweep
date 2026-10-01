@@ -27,6 +27,7 @@ import {
   isClassicallyWeakKey,
   isPostQuantumKey,
   isQuantumVulnerableKey,
+  isStatefulHashBasedKey,
   keyAlgorithmLabel,
   keyPosture,
   meetsCnsa2,
@@ -353,7 +354,7 @@ const ML_KEM_KEY_OIDS: Readonly<Record<string, string>> = {
 function postQuantumKeyTypeFromOid(oid: string | null): KeyType {
   if (!oid) return "unknown";
   const name = ML_KEM_KEY_OIDS[oid] ?? signatureAlgorithmName(oid);
-  return name && /^(?:ML|SLH)-/.test(name) ? toKeyType(name.toLowerCase()) : "unknown";
+  return name && /^(?:ML|SLH)-|^HSS-LMS$|^XMSS/.test(name) ? toKeyType(name.toLowerCase()) : "unknown";
 }
 
 /**
@@ -438,6 +439,24 @@ function certificateDetails(cert: CertInfo): CertificateDetails {
   };
 }
 
+/** Post-quantum certificate signatures: ML-DSA, SLH-DSA, their pre-hash variants, and HSS/LMS and XMSS. */
+const POST_QUANTUM_SIGNATURE = /^(?:Hash)?(?:ML|SLH)-DSA|^HSS-LMS$|^XMSS/i;
+const STATEFUL_HASH_SIGNATURE = /^HSS-LMS$|^XMSS/i;
+
+/**
+ * Does a certificate signature meet CNSA 2.0? It specifies ML-DSA-87 for
+ * certificates (the pre-hash HashML-DSA-87 is the same parameter set); LMS and
+ * XMSS are approved only for software and firmware signing, not for a TLS PKI.
+ */
+function signatureMeetsCnsa2(name: string): boolean {
+  return /^(?:Hash)?ML-DSA-87(?:-with-SHA512)?$/i.test(name);
+}
+
+/** The structured CNSA 2.0 standing of a signature finding, omitted for an unrecognized algorithm. */
+function signatureCnsa2(name: string): { cnsa2: boolean } | Record<string, never> {
+  return name === "unknown" ? {} : { cnsa2: signatureMeetsCnsa2(name) };
+}
+
 /** Classify a certificate signature algorithm's post-quantum posture. */
 function signaturePosture(name: string): {
   severity: Severity;
@@ -459,16 +478,18 @@ function signaturePosture(name: string): {
         "Signature algorithm OID was not recognized; treat as unreviewed and identify the algorithm manually before trusting this chain.",
     };
   }
-  if (/^ML-DSA|^SLH-DSA/i.test(name)) {
-    const cnsa =
-      name === "ML-DSA-87"
-        ? "ML-DSA-87 is the CNSA 2.0 signature parameter set."
+  if (POST_QUANTUM_SIGNATURE.test(name)) {
+    const statefulHashBased = STATEFUL_HASH_SIGNATURE.test(name);
+    const cnsa = signatureMeetsCnsa2(name)
+      ? "ML-DSA-87 is the CNSA 2.0 signature parameter set."
+      : statefulHashBased
+        ? "CNSA 2.0 approves LMS and XMSS only for software and firmware signing; certificates need ML-DSA-87 there."
         : "CNSA 2.0 specifies ML-DSA-87, so this parameter set does not meet CNSA 2.0.";
     return {
       severity: "info",
       pq_status: "safe",
       confidence: "confirmed",
-      references: [REFS.fips204, REFS.fips205, REFS.cnsa2],
+      references: statefulHashBased ? [REFS.sp800208, REFS.cnsa2] : [REFS.fips204, REFS.fips205, REFS.cnsa2],
       recommendation: `Post-quantum signature already in use, keep it and track CA/ecosystem interop. ${cnsa}`,
     };
   }
@@ -507,6 +528,10 @@ function signaturePosture(name: string): {
 function leafKeyRecommendation(leaf: CertInfo, pqStatus: PqStatus): string {
   if (isClassicallyWeakKey(leaf.keyType, leaf.keyBits, leaf.curve)) {
     return "Below the SP 800-131A minimum (RSA/DSA ≥ 2048 bits, ECC ≥ 224-bit curve): this key is at risk from classical attack today. Re-key now, then plan the post-quantum migration.";
+  }
+  if (isStatefulHashBasedKey(leaf.keyType)) {
+    const label = keyAlgorithmLabel(leaf.keyType, leaf.keyBits, leaf.curve);
+    return `Post-quantum stateful hash-based key (${label}, NIST SP 800-208). Each one-time key must never be reused, and CNSA 2.0 approves LMS and XMSS only for software and firmware signing, so a TLS certificate key needs ML-DSA-87 where CNSA 2.0 applies.`;
   }
   if (isPostQuantumKey(leaf.keyType)) {
     const label = keyAlgorithmLabel(leaf.keyType, leaf.keyBits, leaf.curve);
@@ -551,6 +576,21 @@ function certificatePosture(cert: CertInfo): CertPosture {
   return "unknown";
 }
 
+/** A certificate's CNSA 2.0 standing from its key and signature: null when either is unrecognized and the other passes. */
+function certificateCnsa2(cert: CertInfo): boolean | null {
+  const key = cert.keyType === "unknown" ? null : meetsCnsa2(cert.keyType);
+  const signature = cert.signatureAlgorithm === "unknown" ? null : signatureMeetsCnsa2(cert.signatureAlgorithm);
+  if (key === false || signature === false) return false;
+  return key === true && signature === true ? true : null;
+}
+
+/** The chain meets CNSA 2.0 only if every intermediate does. */
+function chainCnsa2(intermediates: readonly CertInfo[]): boolean | null {
+  const standings = intermediates.map(certificateCnsa2);
+  if (standings.includes(false)) return false;
+  return standings.every((standing) => standing === true) ? true : null;
+}
+
 /** Assess the intermediates, from each one's parsed key type and signature algorithm. */
 function evaluateChain(chain: CertInfo[]): Finding | null {
   const intermediates = serverIntermediates(chain);
@@ -575,6 +615,7 @@ function evaluateChain(chain: CertInfo[]): Finding | null {
             .filter(Boolean)
             .join(", ");
 
+  const cnsa2 = chainCnsa2(intermediates);
   return {
     id: "CSW-TLS-003",
     ruleId: "tls/chain-classical",
@@ -586,6 +627,7 @@ function evaluateChain(chain: CertInfo[]): Finding | null {
       .join(" → "),
     pq_status: classical > 0 ? "vulnerable" : unknown > 0 ? "unknown" : "safe",
     confidence: unknown === 0 ? "confirmed" : "high",
+    ...(cnsa2 === null ? {} : { cnsa2 }),
     certificates: intermediates.map(certificateDetails),
     references: [REFS.fips204, REFS.cnsa2],
     recommendation:
@@ -619,6 +661,7 @@ function evaluateIntermediateSignatures(chain: CertInfo[], target: string): Find
         confidence: sig.confidence,
         algorithm: cert.signatureAlgorithm,
         ...(cert.signatureOid ? { oid: cert.signatureOid } : {}),
+        ...signatureCnsa2(cert.signatureAlgorithm),
         certificates: [certificateDetails(cert)],
         references: sig.references,
         recommendation: sig.recommendation,
@@ -862,6 +905,7 @@ function preTls13KeyExchange(result: TlsScanResult, target: string, probes: Grou
     confidence: "confirmed",
     ...(kex ? { algorithm: kex.label } : {}),
     ...kexBreak(kex),
+    cnsa2: false,
     references: kex?.classicallyWeak ? [REFS.hybridKex, REFS.fips203, REFS.sp800131a] : [REFS.hybridKex, REFS.fips203],
     recommendation,
   };
@@ -900,6 +944,8 @@ function pqKeyExchangeFinding(
     pq_status: allHybrid ? "transitional" : "safe",
     confidence: allNamed ? "confirmed" : "high",
     algorithm: accepted[0]?.name ?? "hybrid-kex",
+    // The server can key a CNSA 2.0 session only if it accepted an ML-KEM-1024 group.
+    cnsa2: cnsaKem,
     references,
     recommendation: `Keep it enabled: sessions with clients that offer these groups resist harvest-now-decrypt-later, while clients that do not still get classical key exchange. ${cnsa}`,
   };
@@ -923,6 +969,7 @@ function noPqKeyExchangeFinding(result: TlsScanResult, target: string, probes: G
       confidence: untried.length === 0 ? "high" : "medium",
       ...(kex ? { algorithm: kex.label } : {}),
       ...kexBreak(kex),
+      cnsa2: false,
       references: [REFS.hybridKex, REFS.mlkemKex, REFS.fips203],
       recommendation:
         untried.length === 0 ? ENABLE_PQ_KEX : `${ENABLE_PQ_KEX} Not conclusively tested: ${untried.join(", ")}.`,
@@ -952,6 +999,7 @@ function noPqKeyExchangeFinding(result: TlsScanResult, target: string, probes: G
       confidence: "medium",
       algorithm: kex.label,
       ...kexBreak(kex),
+      cnsa2: false,
       references: [REFS.hybridKex, REFS.fips203],
       recommendation: ENABLE_PQ_KEX,
     };
@@ -1025,6 +1073,7 @@ export function analyzeTls(
       ...(isClassicallyWeakKey(leaf.keyType, leaf.keyBits, leaf.curve)
         ? { classicalBreak: `the ${keyLabel} key is below the SP 800-131A minimum (RSA/DSA 2048 bits, ECC 224-bit curves)` }
         : {}),
+      ...(leaf.keyType === "unknown" ? {} : { cnsa2: meetsCnsa2(leaf.keyType) }),
       ...(leaf.keyOid ? { oid: leaf.keyOid } : {}),
       usage: leafKeyUsage(result),
       references: posture.references,
@@ -1043,6 +1092,7 @@ export function analyzeTls(
       confidence: sig.confidence,
       algorithm: leaf.signatureAlgorithm,
       ...(leaf.signatureOid ? { oid: leaf.signatureOid } : {}),
+      ...signatureCnsa2(leaf.signatureAlgorithm),
       certificates: [certificateDetails(leaf)],
       references: sig.references,
       recommendation: sig.recommendation,

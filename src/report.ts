@@ -137,6 +137,12 @@ export interface Finding {
    * algorithm label, to put the finding on the act-now board.
    */
   classicalBreak?: string;
+  /**
+   * Whether the primitive is one CNSA 2.0 specifies (ML-KEM-1024, ML-DSA-87;
+   * LMS and XMSS for software and firmware signing), when the scanner
+   * determined it in context. Absent, the risk engine judges the algorithm label.
+   */
+  cnsa2?: boolean;
   recommendation: string;
   /** Standards / advisories backing the classification. */
   references?: Reference[];

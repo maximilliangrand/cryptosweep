@@ -13,6 +13,10 @@ export const REFS = {
   fips203: { label: "NIST FIPS 203 (ML-KEM)", url: "https://csrc.nist.gov/pubs/fips/203/final" },
   fips204: { label: "NIST FIPS 204 (ML-DSA)", url: "https://csrc.nist.gov/pubs/fips/204/final" },
   fips205: { label: "NIST FIPS 205 (SLH-DSA)", url: "https://csrc.nist.gov/pubs/fips/205/final" },
+  sp800208: {
+    label: "NIST SP 800-208 (stateful hash-based signatures: LMS, HSS, XMSS, XMSS^MT)",
+    url: "https://csrc.nist.gov/pubs/sp/800/208/final",
+  },
   fips1865: {
     label: "NIST FIPS 186-5 (DSA no longer approved for signature generation)",
     url: "https://csrc.nist.gov/pubs/fips/186-5/final",
@@ -58,7 +62,11 @@ export const REFS = {
  */
 const QUANTUM_VULNERABLE_KEY_TYPES = ["rsa", "rsa-pss", "dsa", "ec", "ed25519", "ed448"] as const;
 
-/** NIST post-quantum public-key types: FIPS 203 (ML-KEM), 204 (ML-DSA), 205 (SLH-DSA). */
+/**
+ * NIST post-quantum public-key types: FIPS 203 (ML-KEM), 204 (ML-DSA), 205
+ * (SLH-DSA), and the stateful hash-based schemes of SP 800-208 (HSS/LMS,
+ * XMSS, XMSS^MT, named as RFC 9802 certificates carry them).
+ */
 const POST_QUANTUM_KEY_TYPES = [
   "ml-kem-512",
   "ml-kem-768",
@@ -78,6 +86,9 @@ const POST_QUANTUM_KEY_TYPES = [
   "slh-dsa-shake-192f",
   "slh-dsa-shake-256s",
   "slh-dsa-shake-256f",
+  "hss-lms",
+  "xmss",
+  "xmssmt",
 ] as const;
 
 export type QuantumVulnerableKeyType = (typeof QUANTUM_VULNERABLE_KEY_TYPES)[number];
@@ -133,11 +144,35 @@ export function isPostQuantumKey(keyType: KeyType): keyType is PostQuantumKeyTyp
 }
 
 /**
- * Does a post-quantum key use the CNSA 2.0 parameter set? CNSA 2.0 specifies
- * ML-KEM-1024 and ML-DSA-87 only; SLH-DSA is not part of the suite.
+ * Does a post-quantum key use the CNSA 2.0 parameter set for general use?
+ * CNSA 2.0 specifies ML-KEM-1024 and ML-DSA-87; SLH-DSA is not part of the
+ * suite, and LMS and XMSS are approved only for software and firmware signing.
  */
 export function meetsCnsa2(keyType: KeyType): boolean {
   return keyType === "ml-kem-1024" || keyType === "ml-dsa-87";
+}
+
+/** The stateful hash-based key types (SP 800-208). */
+export function isStatefulHashBasedKey(keyType: KeyType): boolean {
+  return keyType === "hss-lms" || keyType === "xmss" || keyType === "xmssmt";
+}
+
+const CNSA2_ALGORITHM = /^(?:ml-?kem-?1024|(?:secp384r1)?mlkem1024|(?:hash)?ml-dsa-87(?:-with-sha512)?|hss-lms|lms|xmss(?:mt)?)$/i;
+const PUBLIC_KEY_ALGORITHM =
+  /^(?:rsa|rsassa-?pss|dsa|ec(?:dsa|dhe?)?|dhe?|ffdhe|x25519|x448|ed25519|ed448|eddsa|ml-?kem|ml-dsa|slh-dsa|hash(?:ml|slh)-dsa|static-rsa)(?:$|[-_/\d])|mlkem\d+$|^(?:md\d|sha\d*)with|^(?:dsa|ecdsa)with|^jwt-(?:rs|ps|es|eddsa|ed\d|ecdh)/i;
+
+/**
+ * Where an algorithm label stands against CNSA 2.0: true for the algorithms
+ * it specifies (ML-KEM-1024, alone or in the SecP384r1 hybrid; ML-DSA-87; and
+ * LMS / XMSS, which it approves for software and firmware signing), false for
+ * every other public-key algorithm, classical or post-quantum, and null for a
+ * label that is not a public-key algorithm (hashes and ciphers: CNSA 2.0's
+ * AES-256 and SHA-384 requirements are not assessed).
+ */
+export function cnsa2Standing(label: string | undefined): boolean | null {
+  if (!label) return null;
+  if (CNSA2_ALGORITHM.test(label)) return true;
+  return PUBLIC_KEY_ALGORITHM.test(label) ? false : null;
 }
 
 /** Approximate security strength (bits) of a named elliptic curve. */
@@ -183,10 +218,11 @@ export function ir8547Transition(
   return { deprecatedAfter: strength112 ? 2030 : null, disallowedAfter: 2035 };
 }
 
-/** The FIPS standard that defines a post-quantum key type. */
+/** The NIST standard that defines a post-quantum key type. */
 function postQuantumReference(keyType: PostQuantumKeyType): Reference {
   if (keyType.startsWith("ml-kem")) return REFS.fips203;
   if (keyType.startsWith("ml-dsa")) return REFS.fips204;
+  if (isStatefulHashBasedKey(keyType)) return REFS.sp800208;
   return REFS.fips205;
 }
 

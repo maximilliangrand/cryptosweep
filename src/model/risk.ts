@@ -23,6 +23,7 @@
  * or decrypt) is assessed under both quantum threat models and gets the more
  * urgent verdict, and its rationale says so.
  */
+import { cnsa2Standing } from "../crypto";
 import type { CryptoUsage, Finding, PqStatus, Severity } from "../report";
 import { normalizeFinding } from "../report";
 import { entryForRuleId } from "../scanners/deps/registry";
@@ -59,6 +60,12 @@ export interface CryptoAsset {
   /** What the asset is used for, as far as the evidence shows; empty when undetermined. */
   usage: CryptoUsage[];
   pq_status: PqStatus;
+  /**
+   * Whether the asset uses a public-key algorithm CNSA 2.0 specifies; false
+   * when any of its findings uses another one, absent when it is not a
+   * public-key primitive or the evidence does not say.
+   */
+  cnsa2?: boolean;
   worstSeverity: Severity;
   findingIds: string[];
   verdict: MoscaVerdict;
@@ -420,6 +427,33 @@ function assetLabel(f: Finding & { ruleId: string }, usage: readonly CryptoUsage
 const PQ_RANK: Record<PqStatus, number> = { vulnerable: 0, transitional: 1, unknown: 2, safe: 3 };
 const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
 
+/** Usages that mean a public-key primitive (a hash or a MAC is neither, and CNSA 2.0's symmetric rules are not assessed). */
+const PUBLIC_KEY_USAGE: ReadonlySet<CryptoUsage> = new Set<CryptoUsage>(["key-establishment", "signature", "authentication"]);
+
+/**
+ * A finding's CNSA 2.0 standing: the scanner's own verdict when it gave one
+ * (a TLS server that accepted an ML-KEM-1024 group, whatever group it named
+ * first), else the algorithm label's, else, for a quantum-vulnerable
+ * public-key finding without a label (a dependency), false.
+ */
+function cnsa2Of(finding: Finding, usage: readonly CryptoUsage[]): boolean | undefined {
+  if (finding.cnsa2 !== undefined) return finding.cnsa2;
+  const standing = cnsa2Standing(finding.algorithm);
+  if (standing !== null) return standing;
+  if (finding.pq_status === "vulnerable" && usage.some((u) => PUBLIC_KEY_USAGE.has(u))) return false;
+  return undefined;
+}
+
+function withCnsa2(cnsa2: boolean | undefined): { cnsa2: boolean } | Record<string, never> {
+  return cnsa2 === undefined ? {} : { cnsa2 };
+}
+
+/** An asset meets CNSA 2.0 only if every finding that says anything about it does. */
+function combineCnsa2(current: boolean | undefined, next: boolean | undefined): boolean | undefined {
+  if (current === false || next === false) return false;
+  return current ?? next;
+}
+
 interface AssetDraft {
   asset: Omit<CryptoAsset, "verdict">;
   verdict: MoscaVerdict;
@@ -448,6 +482,7 @@ export function assessRisk(target: string, findings: Finding[], profile: EstateP
           ruleId: f.ruleId,
           usage: assessment.usage,
           pq_status: f.pq_status,
+          ...withCnsa2(cnsa2Of(f, assessment.usage)),
           worstSeverity: f.severity,
           findingIds: [f.id],
         },
@@ -457,6 +492,8 @@ export function assessRisk(target: string, findings: Finding[], profile: EstateP
     }
     const a = existing.asset;
     a.findingIds.push(f.id);
+    const cnsa2 = combineCnsa2(a.cnsa2, cnsa2Of(f, assessment.usage));
+    if (cnsa2 !== undefined) a.cnsa2 = cnsa2;
     for (const u of assessment.usage) if (!a.usage.includes(u)) a.usage.push(u);
     if (PQ_RANK[f.pq_status] < PQ_RANK[a.pq_status]) a.pq_status = f.pq_status;
     if (SEVERITY_RANK[f.severity] < SEVERITY_RANK[a.worstSeverity]) a.worstSeverity = f.severity;
@@ -505,8 +542,11 @@ const BREACHING_STATUSES: ReadonlySet<MoscaStatus> = new Set<MoscaStatus>(["expo
  * a confidentiality exposure or by already-broken crypto, while the HNDL
  * obligation is breached only by the former. Counting every off-track asset
  * against every obligation produced one constant dressed as an attribution.
+ * CNSA 2.0 is also breached by any public-key algorithm outside its parameter
+ * sets, however far off the quantum deadline is.
  */
 function breaches(asset: CryptoAsset, obligation: Obligation): boolean {
+  if (obligation.scopes.includes("cnsa2-algorithms") && asset.cnsa2 === false) return true;
   if (!BREACHING_STATUSES.has(asset.verdict.status)) return false;
   const scope = THREAT_SCOPE[asset.verdict.threat];
   return scope !== null && obligation.scopes.includes(scope);

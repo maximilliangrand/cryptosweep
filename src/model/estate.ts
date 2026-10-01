@@ -22,8 +22,12 @@ import type { Reference } from "../report";
  * - `confidentiality`, data recorded today and decrypted later (harvest-now).
  * - `identity`, signatures and identity keys forgeable once a CRQC exists.
  * - `classical-strength`, primitives already broken without a quantum computer.
+ * - `cnsa2-algorithms`, any public-key algorithm other than the ones CNSA 2.0
+ *   specifies, whatever its Mosca status: CNSA 2.0 sets its own deadlines and
+ *   parameter sets, so a sound ECDSA P-256 key or an ML-KEM-768 hybrid that is
+ *   "on track" for the quantum clock still falls short of it.
  */
-export type ObligationScope = "confidentiality" | "identity" | "classical-strength";
+export type ObligationScope = "confidentiality" | "identity" | "classical-strength" | "cnsa2-algorithms";
 
 export interface Obligation {
   id: string;
@@ -77,12 +81,13 @@ export interface EstateProfile {
 const OBLIGATIONS = {
   // Purely a confidentiality exposure: signatures are not harvested.
   hndl: { id: "hndl", label: "Harvest-now-decrypt-later exposure", scopes: ["confidentiality"], reference: REFS.ir8547 },
-  // CNSA 2.0 mandates PQ key establishment AND PQ signatures, but only for
-  // National Security Systems; most CUI systems are bound by NIST guidance instead.
+  // CNSA 2.0 mandates specific PQ parameter sets (ML-KEM-1024, ML-DSA-87) for
+  // key establishment and signatures, but only for National Security Systems;
+  // most CUI systems are bound by NIST guidance instead.
   cnsa2: {
     id: "cnsa-2.0",
     label: "NSA CNSA 2.0 (binding on National Security Systems)",
-    scopes: ["confidentiality", "identity"],
+    scopes: ["confidentiality", "identity", "cnsa2-algorithms"],
     reference: REFS.cnsa2,
   },
   // Rule 1.6(c) requires reasonable efforts to prevent unauthorized disclosure

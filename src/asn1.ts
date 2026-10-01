@@ -121,8 +121,9 @@ export function signatureAlgorithmName(oid: string | null): string | null {
 
 /**
  * Canonical X.509 signature-algorithm OIDs.
- * Sources: RFC 5758, RFC 8410 (EdDSA), RFC 4055 (RSASSA-PSS),
- * NIST CSOR / IETF LAMPS drafts for ML-DSA and SLH-DSA.
+ * Sources: RFC 5758, RFC 8410 (EdDSA), RFC 4055 (RSASSA-PSS), NIST CSOR
+ * (ML-DSA, SLH-DSA and their pre-hash variants), RFC 9708 (HSS/LMS) and
+ * RFC 9802 (XMSS, XMSS^MT).
  */
 const SIGNATURE_ALGORITHM_OIDS: Readonly<Record<string, string>> = {
   // Classically broken digests. Omitting these is worse than not knowing them:
@@ -164,4 +165,25 @@ const SIGNATURE_ALGORITHM_OIDS: Readonly<Record<string, string>> = {
   "2.16.840.1.101.3.4.3.29": "SLH-DSA-SHAKE-192f",
   "2.16.840.1.101.3.4.3.30": "SLH-DSA-SHAKE-256s",
   "2.16.840.1.101.3.4.3.31": "SLH-DSA-SHAKE-256f",
+  // Pre-hash variants (FIPS 204 HashML-DSA, FIPS 205 HashSLH-DSA), NIST CSOR .32-.46.
+  "2.16.840.1.101.3.4.3.32": "HashML-DSA-44-with-SHA512",
+  "2.16.840.1.101.3.4.3.33": "HashML-DSA-65-with-SHA512",
+  "2.16.840.1.101.3.4.3.34": "HashML-DSA-87-with-SHA512",
+  "2.16.840.1.101.3.4.3.35": "HashSLH-DSA-SHA2-128s-with-SHA256",
+  "2.16.840.1.101.3.4.3.36": "HashSLH-DSA-SHA2-128f-with-SHA256",
+  "2.16.840.1.101.3.4.3.37": "HashSLH-DSA-SHA2-192s-with-SHA512",
+  "2.16.840.1.101.3.4.3.38": "HashSLH-DSA-SHA2-192f-with-SHA512",
+  "2.16.840.1.101.3.4.3.39": "HashSLH-DSA-SHA2-256s-with-SHA512",
+  "2.16.840.1.101.3.4.3.40": "HashSLH-DSA-SHA2-256f-with-SHA512",
+  "2.16.840.1.101.3.4.3.41": "HashSLH-DSA-SHAKE-128s-with-SHAKE128",
+  "2.16.840.1.101.3.4.3.42": "HashSLH-DSA-SHAKE-128f-with-SHAKE128",
+  "2.16.840.1.101.3.4.3.43": "HashSLH-DSA-SHAKE-192s-with-SHAKE256",
+  "2.16.840.1.101.3.4.3.44": "HashSLH-DSA-SHAKE-192f-with-SHAKE256",
+  "2.16.840.1.101.3.4.3.45": "HashSLH-DSA-SHAKE-256s-with-SHAKE256",
+  "2.16.840.1.101.3.4.3.46": "HashSLH-DSA-SHAKE-256f-with-SHAKE256",
+  // Stateful hash-based signatures (NIST SP 800-208): HSS/LMS (RFC 9708) and
+  // XMSS, XMSS^MT (RFC 9802); one OID names both the key and the signature.
+  "1.2.840.113549.1.9.16.3.17": "HSS-LMS",
+  "1.3.6.1.5.5.7.6.34": "XMSS",
+  "1.3.6.1.5.5.7.6.35": "XMSSMT",
 };
