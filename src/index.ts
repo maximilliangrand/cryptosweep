@@ -17,7 +17,7 @@ export type {
   ReportSummary,
   Severity,
 } from "./report";
-export { buildReport, failsThreshold, normalizeFinding, sanitizeText, toJson, toMarkdown } from "./report";
+export { DEFAULT_CONFIDENCE, buildReport, confidenceOf, failsThreshold, normalizeFinding, sanitizeText, toJson, toMarkdown } from "./report";
 export { toCbom, describeAlgorithm } from "./output/cbom";
 export { toSarif } from "./output/sarif";
 export { toHtml } from "./output/viewer";

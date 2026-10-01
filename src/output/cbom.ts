@@ -26,7 +26,7 @@ import { createHash } from "node:crypto";
 import { describeAlgorithm } from "../algorithms";
 import type { AlgorithmDescriptor } from "../algorithms";
 import { resolveUsage } from "../model/risk";
-import { sanitizeText } from "../report";
+import { confidenceOf, sanitizeText } from "../report";
 import type { CertificateDetails, CryptoUsage, Finding, PqStatus, Report, Severity } from "../report";
 import { entryForRuleId } from "../scanners/deps/registry";
 import { VERSION } from "../version";
@@ -207,7 +207,7 @@ function withProvenance<T extends CryptoComponent | LibraryComponent>(component:
     ...component.properties,
     { name: "cryptosweep:pq_status", value: worstPq },
     { name: "cryptosweep:severity", value: worstSeverity },
-    ...unique(findings.map((f) => f.confidence ?? "medium")).map((value) => ({ name: "cryptosweep:confidence", value })),
+    ...unique(findings.map(confidenceOf)).map((value) => ({ name: "cryptosweep:confidence", value })),
     ...unique(findings.map((f) => f.id)).map((value) => ({ name: "cryptosweep:finding", value })),
   ];
   const occurrences = uniqueBy(findings.map(occurrenceOf).filter((o): o is Occurrence => o !== null), (o) => `${o.location}#${o.line ?? ""}`);

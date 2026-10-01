@@ -12,7 +12,7 @@
  *
  * Spec: https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html
  */
-import { ruleIdFromLabel } from "../report";
+import { confidenceOf, ruleIdFromLabel } from "../report";
 import type { Finding, Report, Severity } from "../report";
 import { entryForRuleId } from "../scanners/deps/registry";
 import { SOURCE_RULES } from "../scanners/source-rules";
@@ -254,7 +254,7 @@ function resultFor(finding: Finding, ruleId: string, ruleIndex: number): SarifRe
       severity: finding.severity,
       "security-severity": score.toFixed(1),
       pq_status: finding.pq_status,
-      confidence: finding.confidence ?? "medium",
+      confidence: confidenceOf(finding),
       evidence: finding.evidence,
     },
   };

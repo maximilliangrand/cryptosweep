@@ -24,67 +24,9 @@ import {
 } from "@blueprintjs/core";
 import "@blueprintjs/core/lib/css/blueprint.css";
 import "./styles.css";
-
-type Severity = "critical" | "high" | "medium" | "low" | "info";
-
-interface Reference {
-  label: string;
-  url?: string;
-}
-interface Finding {
-  id: string;
-  ruleId?: string;
-  severity: Severity;
-  category: string;
-  title: string;
-  evidence: string;
-  location?: { path?: string; line?: number; host?: string; port?: number };
-  pq_status: string;
-  confidence?: string;
-  algorithm?: string;
-  recommendation: string;
-  references?: Reference[];
-}
-interface CoverageEntry {
-  check: string;
-  scope: string;
-  complete: boolean;
-  note?: string;
-}
-interface Report {
-  target: string;
-  scanned_at: string;
-  summary: Record<Severity | "findings", number>;
-  findings: Finding[];
-  coverage?: CoverageEntry[];
-}
-interface MoscaVerdict {
-  threat: string;
-  status: string;
-  horizonYears: number;
-  migrationYears: number;
-  crqcYear: number;
-  mustStartInYears: number;
-  rationale: string;
-}
-interface RiskAsset {
-  key: string;
-  label: string;
-  pq_status: string;
-  verdict: MoscaVerdict;
-}
-interface RiskModel {
-  assumptions: { crqcYear: number; crqcBasis: string; dataClass: string; horizonYears: number };
-  assets: RiskAsset[];
-  ledger: {
-    exposedAssets: number;
-    overdueAssets: number;
-    actNowAssets: number;
-    onTrackAssets: number;
-    exposureRiskYears: number;
-    headline: string;
-  };
-}
+// The report and risk-model shapes come from the scanner itself (type-only, erased from the bundle).
+import type { CoverageEntry, Finding, Report, Severity } from "../src/report";
+import type { RiskModel } from "../src/model/risk";
 
 const SEVERITIES: Severity[] = ["critical", "high", "medium", "low", "info"];
 const PQ_STATUSES = ["vulnerable", "transitional", "safe", "unknown"];

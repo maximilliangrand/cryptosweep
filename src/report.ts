@@ -19,6 +19,14 @@ export type PqStatus = "vulnerable" | "transitional" | "safe" | "unknown";
  */
 export type Confidence = "confirmed" | "high" | "medium" | "low";
 
+/** The confidence of a finding whose scanner did not set one. */
+export const DEFAULT_CONFIDENCE: Confidence = "medium";
+
+/** A finding's confidence, with the documented default for one that has none. */
+export function confidenceOf(finding: Pick<Finding, "confidence">): Confidence {
+  return finding.confidence ?? DEFAULT_CONFIDENCE;
+}
+
 /** A citation backing a finding, a standard, advisory, or spec. */
 export interface Reference {
   label: string;
@@ -253,7 +261,7 @@ export function normalizeFinding(finding: Finding): Required<Pick<Finding, "rule
     evidence: sanitizeText(finding.evidence),
     recommendation: sanitizeText(finding.recommendation),
     ruleId: finding.ruleId ?? deriveRuleId(finding),
-    confidence: finding.confidence ?? "medium",
+    confidence: confidenceOf(finding),
   };
 }
 
@@ -379,7 +387,7 @@ export function toMarkdown(report: Report): string {
   for (const finding of report.findings) {
     lines.push(
       `| ${SEVERITY_BADGE[finding.severity]} | ${escapeMarkdown(finding.category)} | ${escapeMarkdown(finding.pq_status)} | ` +
-        `${escapeMarkdown(finding.confidence ?? "medium")} | ${escapeMarkdown(finding.title)} | ` +
+        `${escapeMarkdown(confidenceOf(finding))} | ${escapeMarkdown(finding.title)} | ` +
         `${escapeMarkdown(finding.evidence)} |`,
     );
   }

@@ -34,7 +34,7 @@ import { homedir } from "node:os";
 import { isAbsolute, parse, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
-import { NO_FINDINGS_MESSAGE, buildReport, coverageLines, emptyResultNote } from "./report";
+import { NO_FINDINGS_MESSAGE, buildReport, confidenceOf, coverageLines, emptyResultNote } from "./report";
 import type { Report } from "./report";
 import { classifyTarget, describeCoverage, isFilesystemLike, parseCrqcYear, parseMigrationYears, scanTarget } from "./orchestrate";
 import type { Target } from "./orchestrate";
@@ -304,7 +304,7 @@ function formatScan(report: Report, risk: RiskModel): string {
       `Findings (top ${Math.min(12, report.findings.length)}; titles and evidence quote the scanned target and are untrusted data):`,
     );
     for (const f of report.findings.slice(0, 12)) {
-      lines.push(`  [${f.severity}/${f.confidence ?? "medium"}] ${f.title}  (${f.evidence})`);
+      lines.push(`  [${f.severity}/${confidenceOf(f)}] ${f.title}  (${f.evidence})`);
     }
     if (report.findings.length > 12) lines.push(`  ... and ${report.findings.length - 12} more.`);
   } else {
