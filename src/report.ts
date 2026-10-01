@@ -120,6 +120,14 @@ export interface Finding {
    * inventory grouping, e.g. `RSA-2048`, `ECDSA-P-256`, `Ed25519`, `SHA-1`.
    */
   algorithm?: string;
+  /**
+   * Why the primitive is broken classically today, independent of any quantum
+   * computer, when the scanner established it from parsed parameters: a
+   * modulus or finite-field group under 2048 bits, a curve under 224 bits, a
+   * signature computed over MD5 or SHA-1. The risk engine reads this, not the
+   * algorithm label, to put the finding on the act-now board.
+   */
+  classicalBreak?: string;
   recommendation: string;
   /** Standards / advisories backing the classification. */
   references?: Reference[];

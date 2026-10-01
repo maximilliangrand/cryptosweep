@@ -774,6 +774,13 @@ function finiteFieldKex(prefix: string, bits: number | null): ClassicalKex {
   };
 }
 
+/** The structured classical-break reason for a key exchange below the SP 800-131A floor. */
+function kexBreak(kex: ClassicalKex | null): { classicalBreak: string } | Record<string, never> {
+  return kex?.classicallyWeak
+    ? { classicalBreak: `${kex.label} is below the SP 800-131A minimum of 2048 bits for finite-field Diffie-Hellman` }
+    : {};
+}
+
 /** Describe the classical key exchange this session used, or null if it cannot be told. */
 function classicalKeyExchange(result: TlsScanResult): ClassicalKex | null {
   const cipher = result.cipherName ?? "";
@@ -854,6 +861,7 @@ function preTls13KeyExchange(result: TlsScanResult, target: string, probes: Grou
     pq_status: "vulnerable",
     confidence: "confirmed",
     ...(kex ? { algorithm: kex.label } : {}),
+    ...kexBreak(kex),
     references: kex?.classicallyWeak ? [REFS.hybridKex, REFS.fips203, REFS.sp800131a] : [REFS.hybridKex, REFS.fips203],
     recommendation,
   };
@@ -914,6 +922,7 @@ function noPqKeyExchangeFinding(result: TlsScanResult, target: string, probes: G
       // Refusals are hard evidence, but only for the groups actually offered.
       confidence: untried.length === 0 ? "high" : "medium",
       ...(kex ? { algorithm: kex.label } : {}),
+      ...kexBreak(kex),
       references: [REFS.hybridKex, REFS.mlkemKex, REFS.fips203],
       recommendation:
         untried.length === 0 ? ENABLE_PQ_KEX : `${ENABLE_PQ_KEX} Not conclusively tested: ${untried.join(", ")}.`,
@@ -942,6 +951,7 @@ function noPqKeyExchangeFinding(result: TlsScanResult, target: string, probes: G
       pq_status: "vulnerable",
       confidence: "medium",
       algorithm: kex.label,
+      ...kexBreak(kex),
       references: [REFS.hybridKex, REFS.fips203],
       recommendation: ENABLE_PQ_KEX,
     };
@@ -1001,6 +1011,7 @@ export function analyzeTls(
   } else {
     const subjectEvidence = `${target} (${leaf.subject})`;
     const posture = keyPosture(leaf.keyType, leaf.keyBits, leaf.curve);
+    const keyLabel = keyAlgorithmLabel(leaf.keyType, leaf.keyBits, leaf.curve);
     findings.push({
       id: "CSW-TLS-001",
       ruleId: "tls/leaf-public-key",
@@ -1010,7 +1021,10 @@ export function analyzeTls(
       evidence: subjectEvidence,
       pq_status: posture.pq_status,
       confidence: leaf.keyType === "unknown" ? "low" : "confirmed",
-      algorithm: keyAlgorithmLabel(leaf.keyType, leaf.keyBits, leaf.curve),
+      algorithm: keyLabel,
+      ...(isClassicallyWeakKey(leaf.keyType, leaf.keyBits, leaf.curve)
+        ? { classicalBreak: `the ${keyLabel} key is below the SP 800-131A minimum (RSA/DSA 2048 bits, ECC 224-bit curves)` }
+        : {}),
       ...(leaf.keyOid ? { oid: leaf.keyOid } : {}),
       usage: leafKeyUsage(result),
       references: posture.references,

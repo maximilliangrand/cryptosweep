@@ -206,15 +206,19 @@ const SECRET_MATERIAL_REASON = "private key material committed to a repository i
 const OBSOLETE_PROTOCOL_REASON = "protocol versions below TLS 1.2 are deprecated (RFC 8996)";
 
 /**
- * Key labels below the SP 800-131A classical minimum (RSA/DSA < 2048 bits,
- * ECC < 224-bit curve). These are broken without a quantum computer, so they
- * belong on the act-now board, not on the Mosca clock.
+ * Key labels below the SP 800-131A classical minimum (RSA/DSA and finite-field
+ * DH < 2048 bits, ECC < 224-bit curve). These are broken without a quantum
+ * computer, so they belong on the act-now board, not on the Mosca clock.
+ *
+ * This is the fallback for findings built without a `classicalBreak` (a
+ * library caller's own findings); the scanners set that field from the
+ * parameters they parsed, so their verdict never depends on a label parse.
  */
 function isClassicallyWeakLabel(algorithm: string | undefined): boolean {
   if (!algorithm) return false;
-  const integer = /^(?:rsa|rsa-pss|dsa)-(\d+)$/i.exec(algorithm);
+  const integer = /^(?:rsa|rsa-pss|dsa|dhe?|ffdhe)-(\d+)$/i.exec(algorithm);
   if (integer?.[1]) return Number(integer[1]) < 2048;
-  const elliptic = /^(?:ecdsa|ecdh)-(?:p-|secp|sect|brainpoolp)?(\d+)/i.exec(algorithm);
+  const elliptic = /^(?:ecdsa|ecdhe?)-(?:p-|prime|secp|sect|brainpoolp)?(\d+)/i.exec(algorithm);
   if (elliptic?.[1]) return Number(elliptic[1]) < 224;
   return false;
 }
@@ -237,20 +241,22 @@ export function resolveUsage(finding: Finding): CryptoUsage[] {
 /**
  * The reason a finding is broken classically today, or undefined.
  *
- * Committed key material is compromised whatever the scanner says about it.
- * An algorithm is a present-day break only where the scanner flagged it: a
- * scanner that finds SHA-1 computing an ETag or inside HMAC reports it with a
- * `pq_status` other than `vulnerable`, because nothing there relies on the
- * collision resistance that is broken, and that finding stays off the board.
+ * Committed key material is compromised whatever the scanner says about it,
+ * and a scanner that parsed sub-floor parameters says so in `classicalBreak`.
+ * Otherwise an algorithm is a present-day break only where the scanner flagged
+ * it: a scanner that finds SHA-1 computing an ETag or inside HMAC reports it
+ * with a `pq_status` other than `vulnerable`, because nothing there relies on
+ * the collision resistance that is broken, and that finding stays off the board.
  */
 function classicalBreak(finding: Finding, usage: readonly CryptoUsage[]): string | undefined {
   if (usage.includes("secret-material")) return SECRET_MATERIAL_REASON;
+  if (finding.classicalBreak) return finding.classicalBreak;
   if (finding.pq_status !== "vulnerable") return undefined;
   const algorithm = finding.algorithm ?? "";
   const hit = CLASSICAL_BREAKS.find((row) => row.algorithm.test(algorithm));
   if (hit) return hit.reason;
   if (isClassicallyWeakLabel(finding.algorithm)) {
-    return "the key is below the SP 800-131A minimum (RSA/DSA 2048 bits, ECC 224-bit curves)";
+    return "the key or group is below the SP 800-131A minimum (RSA, DSA and finite-field DH 2048 bits, ECC 224-bit curves)";
   }
   const version = finding.protocol?.version;
   if (finding.protocol?.type === "tls" && version && /^1(?:\.[01])?$/.test(version)) return OBSOLETE_PROTOCOL_REASON;
@@ -505,7 +511,9 @@ function buildLedger(assets: CryptoAsset[], dataClass: DataClass): HarvestLedger
       ? `${exposed.length} asset(s) protecting ${dataClass.label.toLowerCase()} data are already exposed to harvest-now-decrypt-later (${exposureRiskYears.toFixed(0)} sensitivity-weighted risk-years accruing).`
       : overdue > 0
         ? `No harvest-now exposure at the current horizon, but ${overdue} asset(s) are on an overdue migration path.`
-        : "No harvest-now-decrypt-later exposure at the current data horizon and quantum assumption.";
+        : actNow > 0
+          ? `No harvest-now-decrypt-later exposure at the current data horizon, but ${actNow} asset(s) are broken today without a quantum computer (act now).`
+          : "No harvest-now-decrypt-later exposure at the current data horizon and quantum assumption.";
 
   return {
     totalAssets: assets.length,

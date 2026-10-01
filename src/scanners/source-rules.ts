@@ -591,6 +591,8 @@ export interface Assessment {
   readonly pq: PqStatus;
   readonly confidence: Confidence;
   readonly algorithm?: string;
+  /** Why the parameters are broken classically today, when they are (see `Finding.classicalBreak`). */
+  readonly classicalBreak?: string;
   readonly recommendation: string;
   readonly references: Reference[];
 }
@@ -606,7 +608,7 @@ export function minConfidence(a: Confidence, b: Confidence): Confidence {
   return CONFIDENCE_RANK.indexOf(a) <= CONFIDENCE_RANK.indexOf(b) ? a : b;
 }
 
-const WEAK_DIGEST = /md5|sha-?1(?!\d)/i;
+const WEAK_DIGEST = /md[245]|sha-?1(?!\d)/i;
 
 /** Bits of security implied by a curve name (`P-256`, `secp384r1`, `brainpoolP256r1`). */
 function curveBits(curve: string): number | null {
@@ -626,6 +628,7 @@ export function assess(hit: RuleHit): Assessment {
   let severity = selection.severity ?? rule.severity;
   let confidence = minConfidence(hit.tier, rule.confidence);
   const notes: string[] = selection.note ? [selection.note] : [];
+  const breaks: string[] = [];
   const references = [...rule.references];
   const cite = (ref: Reference): void => {
     if (!references.some((r) => r.label === ref.label)) references.push(ref);
@@ -636,12 +639,14 @@ export function assess(hit: RuleHit): Assessment {
     notes.push(
       `The ${selection.bits}-bit size is below the SP 800-131A minimum of 2048 bits, so it is breakable without a quantum computer; replace it now.`,
     );
+    breaks.push(`the ${selection.bits}-bit size is below the SP 800-131A minimum of 2048 bits`);
     cite(REFS.sp800131a);
   }
   const strength = selection.curve ? curveBits(selection.curve) : null;
   if (selection.curve && strength !== null && strength < 224) {
     severity = maxSeverity(severity, "high");
     notes.push(`The ${selection.curve} curve is below the SP 800-131A minimum of 224 bits and is weak today; replace it now.`);
+    breaks.push(`the ${selection.curve} curve is below the SP 800-131A minimum of 224 bits`);
     cite(REFS.sp800131a);
   }
   if (selection.digest && WEAK_DIGEST.test(selection.digest)) {
@@ -649,6 +654,7 @@ export function assess(hit: RuleHit): Assessment {
     notes.push(
       "The signature is computed over MD5 or SHA-1, which SP 800-131A disallows for signature generation: collisions make it forgeable today.",
     );
+    breaks.push(`the signature is computed over ${selection.digest}, and SP 800-131A disallows MD5 and SHA-1 for signature generation`);
     cite(REFS.sp800131a);
   }
   if (rule.roleSensitive) {
@@ -672,6 +678,7 @@ export function assess(hit: RuleHit): Assessment {
     pq: selection.pq ?? rule.pq,
     confidence,
     algorithm: selection.algorithm,
+    ...(breaks.length > 0 ? { classicalBreak: breaks.join("; ") } : {}),
     recommendation: [...notes, rule.recommendation].join(" "),
     references,
   };
